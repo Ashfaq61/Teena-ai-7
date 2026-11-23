@@ -579,7 +579,7 @@ class TeenaNetworkClients {
             when {
                 json.has("error") -> {
                     val err = json.opt("error")
-                    if (err is JSONObject) err.optString("message", body) else err.toString()
+                    if (err is JSONObject) err.optString("message", body) else err?.toString() ?: body
                 }
                 json.has("message") -> json.optString("message")
                 else -> null
