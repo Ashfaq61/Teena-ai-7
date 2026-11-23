@@ -234,26 +234,58 @@ jobs:
             --latest
 
       - name: Report APK download result
+        id: report_release
         if: always()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           UPLOAD_OUTCOME="${{ steps.upload_apk.outcome }}"
           RELEASE_OUTCOME="${{ steps.create_release.outcome }}"
-          RELEASE_TAG="${{ steps.create_release.outputs.release_tag }}"
+          RAW_TAG="${{ steps.create_release.outputs.release_tag }}"
+          RELEASE_TAG="$(printf '%s' "$RAW_TAG" | tr -d '[:space:]')"
           RELEASE_TITLE="${{ steps.create_release.outputs.release_title }}"
-          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
+          RAW_ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
+          ASSET_NAME="$(printf '%s' "$RAW_ASSET_NAME" | tr ' ' '-')"
 
           if [ "$RELEASE_OUTCOME" = "success" ]; then
-            RELEASE_URL="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
-            CONFIRMED_TITLE="$(gh release view "$RELEASE_TAG" --json name --jq '.name')"
-            CONFIRMED_ASSET="$(gh release view "$RELEASE_TAG" --json assets --jq --arg expected "$ASSET_NAME" '(.assets[] | select(.name == $expected) | .name) // .assets[0].name // ""')"
+            if [ -z "$RELEASE_TAG" ]; then
+              echo "::warning::Release succeeded but release_tag output is empty."
+              exit 1
+            fi
+
+            VIEW_ERR_FILE="${RUNNER_TEMP}/gh-release-view.err"
+            if ! RELEASE_URL="$(gh release view "$RELEASE_TAG" --json url --jq '.url' 2>"$VIEW_ERR_FILE")"; then
+              echo "::warning::gh release view failed while reading release URL for tag '${RELEASE_TAG}':"
+              cat "$VIEW_ERR_FILE" >&2 || true
+              exit 1
+            fi
+
+            if ! CONFIRMED_TITLE="$(gh release view "$RELEASE_TAG" --json name --jq '.name' 2>"$VIEW_ERR_FILE")"; then
+              echo "::warning::gh release view failed while reading release title for tag '${RELEASE_TAG}':"
+              cat "$VIEW_ERR_FILE" >&2 || true
+              CONFIRMED_TITLE="$RELEASE_TITLE"
+            fi
+
+            if ! ALL_ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' 2>"$VIEW_ERR_FILE")"; then
+              echo "::warning::gh release view failed while reading release assets for tag '${RELEASE_TAG}':"
+              cat "$VIEW_ERR_FILE" >&2 || true
+              ALL_ASSETS=""
+            fi
+
+            CONFIRMED_ASSET="$(printf '%s\n' "$ALL_ASSETS" | grep -Fx -- "$ASSET_NAME" | head -n 1 || true)"
+            if [ -z "$CONFIRMED_ASSET" ]; then
+              CONFIRMED_ASSET="$(printf '%s\n' "$ALL_ASSETS" | head -n 1 || true)"
+            fi
+            if [ -z "$CONFIRMED_ASSET" ]; then
+              CONFIRMED_ASSET="$ASSET_NAME"
+            fi
 
             echo "Release Tag: ${RELEASE_TAG}"
             echo "Release Title: ${CONFIRMED_TITLE:-$RELEASE_TITLE}"
             echo "GitHub Release URL: ${RELEASE_URL}"
-            echo "Release Asset Filename: ${CONFIRMED_ASSET:-$ASSET_NAME}"
+            echo "Release Asset Filename: ${CONFIRMED_ASSET}"
 
             {
               echo "### Debug APK Build & Release Summary"
@@ -261,10 +293,10 @@ jobs:
               echo "- **Status**: APK build, artifact upload (\`app-debug-apk\`), and GitHub Release publishing succeeded."
               echo "- **Release Tag**: \`${RELEASE_TAG}\`"
               echo "- **Release Title**: ${CONFIRMED_TITLE:-$RELEASE_TITLE}"
-              echo "- **APK Asset Filename**: \`${CONFIRMED_ASSET:-$ASSET_NAME}\`"
+              echo "- **APK Asset Filename**: \`${CONFIRMED_ASSET}\`"
               echo "- **Direct GitHub Release URL**: ${RELEASE_URL}"
               echo ""
-              echo "You can download \`${CONFIRMED_ASSET:-$ASSET_NAME}\` directly from the **Assets** section on the GitHub Release page above. The GitHub Actions artifact \`app-debug-apk\` is also available as a backup."
+              echo "You can download \`${CONFIRMED_ASSET}\` directly from the **Assets** section on the GitHub Release page above. The GitHub Actions artifact \`app-debug-apk\` is also available as a backup."
             } >> "$GITHUB_STEP_SUMMARY"
           elif [ "$UPLOAD_OUTCOME" = "success" ]; then
             echo "::warning::GitHub Release publishing failed, but the debug APK build succeeded and the Actions artifact 'app-debug-apk' remains available."
