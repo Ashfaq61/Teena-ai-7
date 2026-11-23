@@ -192,7 +192,7 @@ fun DashboardScreen(
                     }
                 )
                 Text(
-                    text = "Primary Model: ${primarySlot?.selectedModel ?: "gemini-3.8-flash"} (${primarySlot?.label ?: "Gemini AI Logic"})",
+                    text = "Primary Model: ${primarySlot?.selectedModel?.ifBlank { "Auto via ModelRegistry" } ?: "Not selected"} (${primarySlot?.label ?: "Configure in API Manager"})",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )

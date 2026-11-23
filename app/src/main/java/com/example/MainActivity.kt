@@ -48,7 +48,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.example.core.configureAppCheck
 import com.example.ui.screens.AboutTeenaScreen
 import com.example.ui.screens.AgentsAndCollabScreen
 import com.example.ui.screens.ApiManagerScreen
@@ -77,10 +76,6 @@ private data class TopNavItem(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // STEP 1: Mandatory App Check configuration with launch intent before UI or ViewModels
-        configureAppCheck(this, intent)
-
         enableEdgeToEdge()
         setContent {
             val viewModel: TeenaViewModel = viewModel()

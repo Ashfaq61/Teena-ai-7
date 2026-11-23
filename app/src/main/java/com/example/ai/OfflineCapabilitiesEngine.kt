@@ -153,7 +153,7 @@ class OfflineCapabilitiesEngine(private val context: Context) {
         return OfflineIntentResult(
             handledLocally = false,
             detectedLanguage = lang,
-            replyText = "Offline mode active ($lang). No local memory matched your query, and this device (${"%.1f".format(hw.totalRamGb)} GB RAM, AICore=${hw.hasAiCore}) requires a connected AI provider (Gemini AI Logic, Groq, OpenRouter, or a local OpenAI-compatible server) for open-ended reasoning."
+            replyText = "Offline mode active ($lang). No local memory matched your query, and this device (${"%.1f".format(hw.totalRamGb)} GB RAM, AICore=${hw.hasAiCore}) requires a connected AI provider (Gemini API Key, Groq, OpenRouter, or a local OpenAI-compatible server) for open-ended reasoning."
         )
     }
 }

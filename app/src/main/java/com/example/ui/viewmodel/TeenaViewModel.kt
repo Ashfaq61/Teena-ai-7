@@ -156,13 +156,21 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private val _attachedDocNote = MutableStateFlow<String?>(null)
     val attachedDocNote: StateFlow<String?> = _attachedDocNote.asStateFlow()
 
-    // Gemini Live Voice Manager
-    val liveVoiceManager = GeminiLiveVoiceManager(application) { toolName, args ->
+    // Gemini Live Voice Manager (Direct OkHttp WebSocket + ModelRegistry + Keystore API key)
+    val liveVoiceManager = GeminiLiveVoiceManager(
+        context = application,
+        httpClient = container.networkClients.httpClient,
+        modelRegistry = container.networkClients.modelRegistry,
+        resolvePrimaryGeminiKey = { container.aiBrain.resolvePrimaryGeminiSlotAndKey().second },
+        onSessionLifecycleChanged = { refreshSystemHealth() }
+    ) { toolName, args ->
         handleLiveVoiceTool(toolName, args)
     }
     val liveVoiceState: StateFlow<LiveVoiceState> = liveVoiceManager.state
     val liveVoiceStatus: StateFlow<String> = liveVoiceManager.statusDetail
+    val liveVoiceModel: StateFlow<String?> = liveVoiceManager.activeLiveModel
     val liveTranscript: StateFlow<List<LiveTranscriptLine>> = liveVoiceManager.transcript
+    val isLiveVoiceConnected: Boolean get() = liveVoiceManager.isSessionActuallyConnected
 
     // Research & Discovery state
     private val _isBusy = MutableStateFlow(false)
@@ -231,8 +239,16 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _permissionSnapshot.value = container.permissionManager.captureStatus()
             _hardwareProfile.value = container.offlineEngine.inspectHardware()
-            container.orchestrator.ensureSeededAgentsAndTools()
-            _featureHealth.value = container.orchestrator.evaluateFeatureHealthMatrix()
+            val liveConnected = liveVoiceManager.isSessionActuallyConnected
+            val liveErr = if (liveVoiceState.value == LiveVoiceState.ERROR || liveVoiceState.value == LiveVoiceState.BLOCKED) {
+                liveVoiceStatus.value
+            } else null
+            container.orchestrator.ensureSeededAgentsAndTools(liveConnected)
+            _featureHealth.value = container.orchestrator.evaluateFeatureHealthMatrix(
+                isLiveVoiceConnected = liveConnected,
+                liveVoiceModel = liveVoiceManager.activeLiveModel.value,
+                liveVoiceError = liveErr
+            )
             _apkInspection.value = container.apkBuildEngine.inspectCurrentApk()
         }
     }
@@ -456,7 +472,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 role = "voice",
                 content = "[Voice Tool: $name] -> $result",
                 providerUsed = "Gemini Live Audio",
-                modelUsed = "gemini-2.5-flash-native-audio-preview-12-2025",
+                modelUsed = liveVoiceManager.activeLiveModel.value ?: "auto-detected",
                 isVoiceMessage = true
             )
         )
@@ -488,8 +504,31 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSlotApiKey(slotId: String, newKey: String) {
         viewModelScope.launch {
-            container.vault.saveSecret(slotId, newKey)
-            _statusBanner.value = "API key encrypted in Android Keystore for $slotId."
+            val clean = newKey.trim()
+            if (clean.isEmpty()) {
+                container.vault.deleteSecret(slotId)
+                val slot = db.providerSlotDao().getSlotsOnce().firstOrNull { it.slotId == slotId }
+                if (slot != null) {
+                    db.providerSlotDao().upsertSlot(
+                        slot.copy(
+                            lastTestStatus = "BLOCKED",
+                            lastTestMessage = if (slot.providerType == ProviderType.GEMINI_DIRECT.name) "Gemini API key missing" else "API key missing",
+                            lastTestedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+                _statusBanner.value = "Cleared API key for $slotId."
+            } else {
+                container.vault.saveSecret(slotId, clean)
+                val slot = db.providerSlotDao().getSlotsOnce().firstOrNull { it.slotId == slotId }
+                if (slot != null) {
+                    val tested = container.aiBrain.testProviderSlot(slot)
+                    _statusBanner.value = "${tested.label}: ${tested.lastTestStatus} — ${tested.lastTestMessage}"
+                } else {
+                    _statusBanner.value = "API key encrypted in Android Keystore for $slotId."
+                }
+            }
+            refreshSystemHealth()
         }
     }
 
@@ -497,6 +536,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             db.providerSlotDao().setPrimarySlot(slotId)
             _statusBanner.value = "Primary AI provider updated."
+            refreshSystemHealth()
         }
     }
 
@@ -515,6 +555,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             container.vault.deleteSecret(slotId)
             db.providerSlotDao().deleteSlot(slotId)
             _statusBanner.value = "Removed provider slot."
+            refreshSystemHealth()
         }
     }
 
@@ -982,7 +1023,15 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isBusy.value = true
             val perms = container.permissionManager.captureStatus()
-            val health = container.orchestrator.evaluateFeatureHealthMatrix()
+            val liveConnected = liveVoiceManager.isSessionActuallyConnected
+            val liveErr = if (liveVoiceState.value == LiveVoiceState.ERROR || liveVoiceState.value == LiveVoiceState.BLOCKED) {
+                liveVoiceStatus.value
+            } else null
+            val health = container.orchestrator.evaluateFeatureHealthMatrix(
+                isLiveVoiceConnected = liveConnected,
+                liveVoiceModel = liveVoiceManager.activeLiveModel.value,
+                liveVoiceError = liveErr
+            )
             _featureHealth.value = health
             val active = health.count { it.status == FeatureStatus.ACTIVE }
             val partial = health.count { it.status == FeatureStatus.PARTIAL }
@@ -1042,8 +1091,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun defaultModelFor(type: ProviderType): String = when (type) {
-        ProviderType.GEMINI_AI_LOGIC -> "gemini-3.8-flash"
-        ProviderType.GEMINI_DIRECT -> "gemini-2.5-flash"
+        ProviderType.GEMINI_DIRECT -> ""
         ProviderType.GROQ -> "llama-3.3-70b-versatile"
         ProviderType.OPENROUTER -> "meta-llama/llama-3.3-70b-instruct:free"
         ProviderType.CUSTOM_OPENAI -> "local-model"

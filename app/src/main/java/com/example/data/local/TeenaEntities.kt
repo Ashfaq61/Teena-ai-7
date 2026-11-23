@@ -12,8 +12,7 @@ enum class FeatureStatus {
 }
 
 enum class ProviderType(val displayName: String) {
-    GEMINI_AI_LOGIC("Gemini (Firebase AI Logic)"),
-    GEMINI_DIRECT("Gemini Direct REST"),
+    GEMINI_DIRECT("Gemini (Google AI API Key)"),
     GROQ("Groq Cloud"),
     OPENROUTER("OpenRouter"),
     CUSTOM_OPENAI("Custom OpenAI-Compatible"),

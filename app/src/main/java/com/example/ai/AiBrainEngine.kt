@@ -11,9 +11,6 @@ import com.example.data.local.ProviderType
 import com.example.data.local.TeenaDatabase
 import com.example.data.remote.DiscoveredModel
 import com.example.data.remote.TeenaNetworkClients
-import com.google.firebase.Firebase
-import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.content
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -43,28 +40,44 @@ class AiBrainEngine(
 ) {
     companion object {
         private const val TAG = "AiBrainEngine"
-        private const val SLOT_GEMINI_BUILTIN = "slot_gemini_ai_logic"
-    }
-
-    private val defaultGeminiModel by lazy {
-        Firebase.ai.generativeModel("gemini-3.8-flash")
+        const val SLOT_GEMINI_PRIMARY = "slot_gemini_primary"
+        private const val LEGACY_FIREBASE_SLOT = "slot_gemini_ai_logic"
     }
 
     suspend fun ensureDefaultProviderSlots() {
         val existing = db.providerSlotDao().getSlotsOnce()
-        if (existing.isEmpty()) {
+
+        // Remove any legacy Firebase AI Logic provider slots completely
+        existing.filter {
+            it.slotId == LEGACY_FIREBASE_SLOT || it.providerType == "GEMINI_AI_LOGIC"
+        }.forEach { legacy ->
+            db.providerSlotDao().deleteSlot(legacy.slotId)
+        }
+
+        val remaining = db.providerSlotDao().getSlotsOnce()
+        val hasGeminiSlot = remaining.any { it.providerType == ProviderType.GEMINI_DIRECT.name }
+        if (!hasGeminiSlot) {
+            val hasStoredKey = vault.hasSecret(SLOT_GEMINI_PRIMARY)
+            val hasAnotherPrimary = remaining.any { it.isPrimary }
             db.providerSlotDao().upsertSlot(
                 ProviderSlotEntity(
-                    slotId = SLOT_GEMINI_BUILTIN,
-                    providerType = ProviderType.GEMINI_AI_LOGIC.name,
-                    label = "Gemini Built-In (Firebase AI Logic)",
-                    selectedModel = "gemini-3.8-flash",
+                    slotId = SLOT_GEMINI_PRIMARY,
+                    providerType = ProviderType.GEMINI_DIRECT.name,
+                    label = "Gemini Cloud API (Primary)",
+                    selectedModel = "",
                     isEnabled = true,
-                    isPrimary = true,
-                    lastTestStatus = "READY",
-                    lastTestMessage = "App Check configured; ready for live test."
+                    isPrimary = !hasAnotherPrimary,
+                    lastTestStatus = if (hasStoredKey) "READY" else "BLOCKED",
+                    lastTestMessage = if (hasStoredKey) {
+                        "API key stored in Keystore vault; tap Test to verify."
+                    } else {
+                        "Gemini API key missing"
+                    }
                 )
             )
+        }
+
+        if (remaining.none { it.providerType == ProviderType.OFFLINE_LOCAL.name }) {
             db.providerSlotDao().upsertSlot(
                 ProviderSlotEntity(
                     slotId = "slot_offline_local",
@@ -78,6 +91,31 @@ class AiBrainEngine(
                 )
             )
         }
+    }
+
+    /**
+     * Resolves the active API key strictly from the PRIMARY Gemini slot in API Manager
+     * (falling back to any enabled Gemini slot with a stored key only if a non-Gemini provider is primary).
+     */
+    suspend fun resolvePrimaryGeminiSlotAndKey(): Pair<ProviderSlotEntity?, String?> {
+        val slots = db.providerSlotDao().getSlotsOnce()
+        val geminiSlots = slots.filter { it.providerType == ProviderType.GEMINI_DIRECT.name && it.isEnabled }
+        if (geminiSlots.isEmpty()) return null to null
+
+        val explicitPrimaryGemini = geminiSlots.firstOrNull { it.isPrimary }
+        if (explicitPrimaryGemini != null) {
+            val key = vault.readSecret(explicitPrimaryGemini.slotId)?.trim()?.takeIf { it.isNotEmpty() }
+            return explicitPrimaryGemini to key
+        }
+
+        val firstWithKey = geminiSlots.firstOrNull { !vault.readSecret(it.slotId).isNullOrBlank() }
+        val targetSlot = firstWithKey ?: geminiSlots.first()
+        val key = vault.readSecret(targetSlot.slotId)?.trim()?.takeIf { it.isNotEmpty() }
+        return targetSlot to key
+    }
+
+    suspend fun hasPrimaryGeminiApiKey(): Boolean {
+        return !resolvePrimaryGeminiSlotAndKey().second.isNullOrBlank()
     }
 
     fun generateStreamingChat(
@@ -104,46 +142,66 @@ class AiBrainEngine(
             val start = System.currentTimeMillis()
             try {
                 when (type) {
-                    ProviderType.GEMINI_AI_LOGIC -> {
-                        val model = Firebase.ai.generativeModel(
-                            modelName = slot.selectedModel.ifBlank { "gemini-3.8-flash" },
-                            systemInstruction = content { text(systemPrompt) }
-                        )
-                        val sb = StringBuilder()
-                        withTimeout(60_000L) {
+                    ProviderType.GEMINI_DIRECT -> {
+                        val apiKey = vault.readSecret(slot.slotId)?.trim()
+                        if (apiKey.isNullOrEmpty()) {
+                            markSlotResult(slot, "BLOCKED", "Gemini API key missing", 0L)
+                            failureNotes.add("${slot.label}: Gemini API key missing")
+                            continue
+                        }
+
+                        val resolvedModel = slot.selectedModel.trim().ifBlank {
+                            val detected = network.modelRegistry.autoDetectChatModels(apiKey).getOrThrow()
+                            val chosen = detected.first().shortId
+                            db.providerSlotDao().upsertSlot(slot.copy(selectedModel = chosen))
+                            chosen
+                        }
+
+                        val result = withTimeout(60_000L) {
                             if (attachedImage != null) {
-                                val resp = model.generateContent(
-                                    content {
-                                        image(attachedImage)
-                                        text(userPrompt)
-                                    }
-                                )
-                                val text = resp.text.orEmpty()
-                                sb.append(text)
-                                emit(AiStreamChunk.Delta(text, slot.label, slot.selectedModel))
+                                val resp = network.chatGeminiDirectRest(
+                                    apiKey = apiKey,
+                                    model = resolvedModel,
+                                    systemInstruction = systemPrompt,
+                                    userPrompt = userPrompt,
+                                    recentHistory = recentHistory,
+                                    attachedImage = attachedImage
+                                ).getOrThrow()
+                                emit(AiStreamChunk.Delta(resp.text, slot.label, resp.modelUsed))
+                                resp
                             } else {
-                                val promptWithHistory = buildHistoryWrappedPrompt(recentHistory, userPrompt)
-                                model.generateContentStream(promptWithHistory).collect { chunk ->
-                                    val part = chunk.text.orEmpty()
-                                    if (part.isNotEmpty()) {
-                                        sb.append(part)
-                                        emit(AiStreamChunk.Delta(sb.toString(), slot.label, slot.selectedModel))
-                                    }
+                                network.streamGeminiDirectRest(
+                                    apiKey = apiKey,
+                                    model = resolvedModel,
+                                    systemInstruction = systemPrompt,
+                                    userPrompt = userPrompt,
+                                    recentHistory = recentHistory
+                                ) { accumulated ->
+                                    emit(AiStreamChunk.Delta(accumulated, slot.label, resolvedModel))
+                                }.getOrElse {
+                                    // Fallback to unary REST generateContent if SSE fails on a specific model
+                                    val unary = network.chatGeminiDirectRest(
+                                        apiKey = apiKey,
+                                        model = resolvedModel,
+                                        systemInstruction = systemPrompt,
+                                        userPrompt = userPrompt,
+                                        recentHistory = recentHistory
+                                    ).getOrThrow()
+                                    emit(AiStreamChunk.Delta(unary.text, slot.label, unary.modelUsed))
+                                    unary
                                 }
                             }
                         }
-                        val finalText = sb.toString().trim()
-                        if (finalText.isBlank()) throw IllegalStateException("Gemini returned empty response.")
-                        val latency = System.currentTimeMillis() - start
-                        markSlotResult(slot, "ACTIVE", "Responded in ${latency}ms", latency)
+
+                        markSlotResult(slot.copy(selectedModel = result.modelUsed), "ACTIVE", "Responded in ${result.latencyMs}ms", result.latencyMs)
                         emit(
                             AiStreamChunk.Completed(
                                 AiInferenceOutput(
-                                    text = finalText,
+                                    text = result.text,
                                     providerUsed = slot.label,
-                                    modelUsed = slot.selectedModel,
+                                    modelUsed = result.modelUsed,
                                     detectedLanguage = lang,
-                                    latencyMs = latency,
+                                    latencyMs = result.latencyMs,
                                     failoverNotes = failureNotes.joinToString(" | ")
                                 )
                             )
@@ -179,35 +237,6 @@ class AiBrainEngine(
                             extraHeaders = headers
                         ).getOrThrow()
 
-                        emit(AiStreamChunk.Delta(res.text, slot.label, res.modelUsed))
-                        markSlotResult(slot, "ACTIVE", "Responded in ${res.latencyMs}ms", res.latencyMs)
-                        emit(
-                            AiStreamChunk.Completed(
-                                AiInferenceOutput(
-                                    text = res.text,
-                                    providerUsed = slot.label,
-                                    modelUsed = res.modelUsed,
-                                    detectedLanguage = lang,
-                                    latencyMs = res.latencyMs,
-                                    failoverNotes = failureNotes.joinToString(" | ")
-                                )
-                            )
-                        )
-                        return@flow
-                    }
-
-                    ProviderType.GEMINI_DIRECT -> {
-                        val apiKey = vault.readSecret(slot.slotId)
-                        if (apiKey.isNullOrBlank()) {
-                            failureNotes.add("${slot.label}: missing API key")
-                            continue
-                        }
-                        val res = network.chatGeminiDirectRest(
-                            apiKey = apiKey,
-                            model = slot.selectedModel.ifBlank { "gemini-2.5-flash" },
-                            systemInstruction = systemPrompt,
-                            userPrompt = buildHistoryWrappedPrompt(recentHistory, userPrompt)
-                        ).getOrThrow()
                         emit(AiStreamChunk.Delta(res.text, slot.label, res.modelUsed))
                         markSlotResult(slot, "ACTIVE", "Responded in ${res.latencyMs}ms", res.latencyMs)
                         emit(
@@ -284,12 +313,20 @@ class AiBrainEngine(
                 val type = runCatching { ProviderType.valueOf(slot.providerType) }.getOrNull() ?: continue
                 try {
                     when (type) {
-                        ProviderType.GEMINI_AI_LOGIC -> {
-                            val response = withTimeout(45_000L) {
-                                defaultGeminiModel.generateContent(prompt)
+                        ProviderType.GEMINI_DIRECT -> {
+                            val key = vault.readSecret(slot.slotId)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                            val modelId = slot.selectedModel.trim().ifBlank {
+                                network.modelRegistry.autoDetectChatModels(key).getOrNull()?.firstOrNull()?.shortId ?: continue
                             }
-                            val text = response.text?.trim().orEmpty()
-                            if (text.isNotBlank()) return@runCatching text
+                            val res = withTimeout(45_000L) {
+                                network.chatGeminiDirectRest(
+                                    apiKey = key,
+                                    model = modelId,
+                                    systemInstruction = "",
+                                    userPrompt = prompt
+                                )
+                            }
+                            if (res.isSuccess) return@runCatching res.getOrThrow().text
                         }
                         ProviderType.GROQ, ProviderType.OPENROUTER, ProviderType.CUSTOM_OPENAI -> {
                             val key = vault.readSecret(slot.slotId)
@@ -305,11 +342,6 @@ class AiBrainEngine(
                                 model = slot.selectedModel,
                                 messages = listOf("user" to prompt)
                             )
-                            if (res.isSuccess) return@runCatching res.getOrThrow().text
-                        }
-                        ProviderType.GEMINI_DIRECT -> {
-                            val key = vault.readSecret(slot.slotId) ?: continue
-                            val res = network.chatGeminiDirectRest(key, slot.selectedModel, "", prompt)
                             if (res.isSuccess) return@runCatching res.getOrThrow().text
                         }
                         ProviderType.OFFLINE_LOCAL -> Unit
@@ -329,20 +361,33 @@ class AiBrainEngine(
         val start = System.currentTimeMillis()
         val updated = try {
             when (type) {
-                ProviderType.GEMINI_AI_LOGIC -> {
-                    val model = Firebase.ai.generativeModel(slot.selectedModel.ifBlank { "gemini-3.8-flash" })
-                    val resp = withTimeout(30_000L) {
-                        model.generateContent("Reply with strictly: OK")
+                ProviderType.GEMINI_DIRECT -> {
+                    val key = vault.readSecret(slot.slotId)?.trim()
+                    if (key.isNullOrEmpty()) {
+                        slot.copy(
+                            lastTestStatus = "BLOCKED",
+                            lastTestMessage = "Gemini API key missing",
+                            lastLatencyMs = 0L,
+                            lastTestedAt = System.currentTimeMillis()
+                        )
+                    } else {
+                        val chatModels = network.modelRegistry.autoDetectChatModels(key).getOrThrow()
+                        val liveModels = network.modelRegistry.autoDetectLiveModels(key).getOrNull().orEmpty()
+                        val targetModel = slot.selectedModel.trim().ifBlank { chatModels.first().shortId }
+                        val res = network.chatGeminiDirectRest(
+                            apiKey = key,
+                            model = targetModel,
+                            systemInstruction = "",
+                            userPrompt = "Reply with OK"
+                        ).getOrThrow()
+                        slot.copy(
+                            selectedModel = targetModel,
+                            lastTestStatus = "ACTIVE",
+                            lastTestMessage = "REST verified (${res.modelUsed}, ${res.latencyMs}ms); ${liveModels.size} Live bidi model(s) detected",
+                            lastLatencyMs = res.latencyMs,
+                            lastTestedAt = System.currentTimeMillis()
+                        )
                     }
-                    val txt = resp.text?.trim().orEmpty()
-                    if (txt.isBlank()) throw IllegalStateException("Empty response")
-                    val lat = System.currentTimeMillis() - start
-                    slot.copy(
-                        lastTestStatus = "ACTIVE",
-                        lastTestMessage = "Verified via Firebase AI Logic (${lat}ms): $txt",
-                        lastLatencyMs = lat,
-                        lastTestedAt = System.currentTimeMillis()
-                    )
                 }
 
                 ProviderType.GROQ -> {
@@ -367,23 +412,6 @@ class AiBrainEngine(
                         model = slot.selectedModel,
                         messages = listOf("user" to "Say OK"),
                         extraHeaders = mapOf("HTTP-Referer" to "https://teena-ai.local", "X-Title" to "Teena AI")
-                    ).getOrThrow()
-                    slot.copy(
-                        lastTestStatus = "ACTIVE",
-                        lastTestMessage = "Verified ${res.modelUsed} in ${res.latencyMs}ms",
-                        lastLatencyMs = res.latencyMs,
-                        lastTestedAt = System.currentTimeMillis()
-                    )
-                }
-
-                ProviderType.GEMINI_DIRECT -> {
-                    val key = vault.readSecret(slot.slotId)
-                        ?: throw IllegalStateException("API key is empty in Keystore vault.")
-                    val res = network.chatGeminiDirectRest(
-                        apiKey = key,
-                        model = slot.selectedModel,
-                        systemInstruction = "",
-                        userPrompt = "Reply with OK"
                     ).getOrThrow()
                     slot.copy(
                         lastTestStatus = "ACTIVE",
@@ -445,14 +473,15 @@ class AiBrainEngine(
 
     suspend fun discoverModelsForProvider(type: ProviderType, slotId: String): Result<List<DiscoveredModel>> {
         return when (type) {
-            ProviderType.GEMINI_AI_LOGIC -> Result.success(
-                listOf(
-                    DiscoveredModel("gemini-3.8-flash", "Gemini 3.8 Flash (Default)", "GEMINI", 1048576, true, "App Check"),
-                    DiscoveredModel("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite (Fast)", "GEMINI", 1048576, true, "App Check"),
-                    DiscoveredModel("gemini-4-argon", "Gemini 4 Argon (Deep Reasoning)", "GEMINI", 1048576, false, "Blaze"),
-                    DiscoveredModel("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1 (Image)", "GEMINI", 32768, false, "Blaze")
-                )
-            )
+            ProviderType.GEMINI_DIRECT -> {
+                val key = vault.readSecret(slotId)?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: resolvePrimaryGeminiSlotAndKey().second
+                if (key.isNullOrBlank()) {
+                    Result.failure(IllegalStateException("Gemini API key missing"))
+                } else {
+                    network.modelRegistry.fetchAllDiscoveredGeminiModels(key)
+                }
+            }
             ProviderType.GROQ -> {
                 val key = vault.readSecret(slotId)
                 if (key.isNullOrBlank()) {
@@ -491,15 +520,5 @@ class AiBrainEngine(
             User long-term memory facts:
             $memSnippet
         """.trimIndent()
-    }
-
-    private fun buildHistoryWrappedPrompt(history: List<Pair<String, String>>, userPrompt: String): String {
-        if (history.isEmpty()) return userPrompt
-        val sb = StringBuilder("Recent conversation context:\n")
-        history.takeLast(6).forEach { (role, msg) ->
-            sb.appendLine("${role.uppercase()}: ${msg.take(400)}")
-        }
-        sb.appendLine("\nCURRENT USER MESSAGE:\n$userPrompt")
-        return sb.toString()
     }
 }

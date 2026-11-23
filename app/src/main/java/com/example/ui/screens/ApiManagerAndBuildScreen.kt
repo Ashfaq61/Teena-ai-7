@@ -40,11 +40,13 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
     val discovered by viewModel.discoveredModels.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
 
-    var selectedType by remember { mutableStateOf(ProviderType.GROQ) }
+    var selectedType by remember { mutableStateOf(ProviderType.GEMINI_DIRECT) }
     var slotLabel by remember { mutableStateOf("") }
     var modelInput by remember { mutableStateOf("") }
     var apiKeyInput by remember { mutableStateOf("") }
     var baseUrlInput by remember { mutableStateOf("") }
+    var editingKeySlotId by remember { mutableStateOf<String?>(null) }
+    var editingKeyDraft by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -60,9 +62,9 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(
                         listOf(
+                            ProviderType.GEMINI_DIRECT,
                             ProviderType.GROQ,
                             ProviderType.OPENROUTER,
-                            ProviderType.GEMINI_DIRECT,
                             ProviderType.CUSTOM_OPENAI
                         )
                     ) { t ->
@@ -76,7 +78,7 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                 OutlinedTextField(
                     value = slotLabel,
                     onValueChange = { slotLabel = it },
-                    label = { Text("Slot Label (e.g. 'Groq Key #1')") },
+                    label = { Text("Slot Label (e.g. 'Gemini Key #1' or 'Groq Key')") },
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
@@ -89,7 +91,15 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                 OutlinedTextField(
                     value = modelInput,
                     onValueChange = { modelInput = it },
-                    label = { Text("Model ID (leave blank for default)") },
+                    label = {
+                        Text(
+                            if (selectedType == ProviderType.GEMINI_DIRECT) {
+                                "Model ID (leave blank to auto-detect via ModelRegistry)"
+                            } else {
+                                "Model ID (leave blank for default)"
+                            }
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (selectedType == ProviderType.CUSTOM_OPENAI) {
@@ -121,7 +131,7 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
 
         if (discovered.isNotEmpty()) {
             item { SectionHeader("Discovered Models (${discovered.size})") }
-            items(discovered.take(15)) { m ->
+            items(discovered.take(20)) { m ->
                 NeuralCard {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -146,27 +156,64 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
 
         items(slots, key = { it.slotId }) { slot ->
             val hasSecret = viewModel.container.vault.hasSecret(slot.slotId)
-            val masked = if (slot.providerType == ProviderType.GEMINI_AI_LOGIC.name) {
-                "Keyless App Check Attestation"
-            } else if (hasSecret) {
-                viewModel.container.vault.maskedPreview(slot.slotId)
-            } else {
-                "No key stored"
+            val isOffline = slot.providerType == ProviderType.OFFLINE_LOCAL.name
+            val masked = when {
+                isOffline -> "On-device deterministic engine (no key needed)"
+                hasSecret -> viewModel.container.vault.maskedPreview(slot.slotId)
+                slot.providerType == ProviderType.GEMINI_DIRECT.name -> "Gemini API key missing"
+                else -> "No key stored"
             }
 
             NeuralCard(borderColor = if (slot.isPrimary) NeuralCyan else MaterialTheme.colorScheme.outline) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(slot.label, style = MaterialTheme.typography.titleMedium)
-                        Text("Model: ${slot.selectedModel}", style = MaterialTheme.typography.labelMedium, color = NeuralCyan)
+                        Text(
+                            text = "Model: ${slot.selectedModel.ifBlank { "Auto-detect via ModelRegistry" }}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = NeuralCyan
+                        )
                         Text("Key: $masked", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     StatusPill(slot.lastTestStatus)
                 }
                 Text(slot.lastTestMessage, style = MaterialTheme.typography.bodySmall)
+
+                if (editingKeySlotId == slot.slotId) {
+                    OutlinedTextField(
+                        value = editingKeyDraft,
+                        onValueChange = { editingKeyDraft = it },
+                        label = { Text("Enter API Key for ${slot.label}") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("edit_slot_key_input_${slot.slotId}")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                viewModel.updateSlotApiKey(slot.slotId, editingKeyDraft)
+                                editingKeySlotId = null
+                                editingKeyDraft = ""
+                            },
+                            enabled = !isBusy
+                        ) { Text("Save & Test") }
+                        OutlinedButton(onClick = {
+                            editingKeySlotId = null
+                            editingKeyDraft = ""
+                        }) { Text("Cancel") }
+                    }
+                }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(onClick = { viewModel.testProviderSlot(slot) }) {
                         Text("Test")
+                    }
+                    if (!isOffline) {
+                        OutlinedButton(onClick = {
+                            editingKeySlotId = if (editingKeySlotId == slot.slotId) null else slot.slotId
+                            editingKeyDraft = ""
+                        }) {
+                            Text(if (hasSecret) "Edit Key" else "Set Key")
+                        }
                     }
                     if (!slot.isPrimary) {
                         OutlinedButton(onClick = { viewModel.setPrimarySlot(slot.slotId) }) {
@@ -175,7 +222,10 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                     } else {
                         StatusPill("PRIMARY")
                     }
-                    if (slot.providerType == ProviderType.GROQ.name || slot.providerType == ProviderType.GEMINI_AI_LOGIC.name) {
+                    if (slot.providerType == ProviderType.GROQ.name ||
+                        slot.providerType == ProviderType.GEMINI_DIRECT.name ||
+                        slot.providerType == ProviderType.OPENROUTER.name
+                    ) {
                         OutlinedButton(onClick = {
                             viewModel.discoverModels(ProviderType.valueOf(slot.providerType), slot.slotId)
                         }) { Text("Models") }

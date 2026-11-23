@@ -67,6 +67,7 @@ import com.example.ui.viewmodel.TeenaViewModel
 fun VoiceAssistantScreen(viewModel: TeenaViewModel) {
     val voiceState by viewModel.liveVoiceState.collectAsStateWithLifecycle()
     val statusDetail by viewModel.liveVoiceStatus.collectAsStateWithLifecycle()
+    val liveVoiceModel by viewModel.liveVoiceModel.collectAsStateWithLifecycle()
     val transcript by viewModel.liveTranscript.collectAsStateWithLifecycle()
     val voiceHistory by viewModel.voiceHistory.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -100,7 +101,7 @@ fun VoiceAssistantScreen(viewModel: TeenaViewModel) {
         LiveVoiceState.LISTENING -> NeuralCyan
         LiveVoiceState.SPEAKING -> NeuralMint
         LiveVoiceState.THINKING, LiveVoiceState.CONNECTING, LiveVoiceState.RECONNECTING -> StatusAmber
-        LiveVoiceState.ERROR -> StatusCrimson
+        LiveVoiceState.ERROR, LiveVoiceState.BLOCKED -> StatusCrimson
         LiveVoiceState.DISCONNECTED -> NeuralViolet
     }
 
@@ -112,7 +113,7 @@ fun VoiceAssistantScreen(viewModel: TeenaViewModel) {
         item {
             SectionHeader(
                 title = "Gemini Live Voice Assistant",
-                subtitle = "Real-time bidirectional audio-to-audio (Urdu, Roman Urdu & English)",
+                subtitle = "Direct WebSocket audio-to-audio via ModelRegistry (Urdu, Roman Urdu & English)",
                 trailing = { StatusPill(voiceState.name) }
             )
         }
@@ -155,10 +156,41 @@ fun VoiceAssistantScreen(viewModel: TeenaViewModel) {
                     }
 
                     Text(
+                        text = liveVoiceModel?.let { "Connected Live Model: $it" }
+                            ?: "Live Model: Auto-detected from ModelRegistry on connect",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (liveVoiceModel != null) NeuralMint else NeuralCyan
+                    )
+
+                    Text(
                         text = statusDetail,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (voiceState == LiveVoiceState.BLOCKED || voiceState == LiveVoiceState.ERROR) {
+                            StatusCrimson
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
                     )
+
+                    if (voiceState == LiveVoiceState.BLOCKED) {
+                        Text(
+                            text = "Add a Gemini API key in More -> API Manager (Primary Gemini slot) to enable Live Voice.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    if (voiceState == LiveVoiceState.SPEAKING) {
+                        OutlinedButton(
+                            onClick = { viewModel.liveVoiceManager.interruptPlaybackNow() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("voice_barge_in_btn")
+                        ) {
+                            Text("Stop Speech (Barge-In)")
+                        }
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

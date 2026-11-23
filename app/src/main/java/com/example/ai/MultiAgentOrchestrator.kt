@@ -51,13 +51,14 @@ class MultiAgentOrchestrator(
         )
     }
 
-    suspend fun ensureSeededAgentsAndTools() {
+    suspend fun ensureSeededAgentsAndTools(isLiveVoiceConnected: Boolean = false) {
         val perms = permissionManager.captureStatus()
+        val hasGeminiKey = aiBrain.hasPrimaryGeminiApiKey()
         val existingAgents = db.agentDao().getAgentsOnce().associateBy { it.agentId }
 
         val updatedAgents = REQUIRED_AGENTS.map { (id, meta) ->
             val prev = existingAgents[id]
-            val (health, reason) = evaluateAgentHealth(id, perms)
+            val (health, reason) = evaluateAgentHealth(id, perms, hasGeminiKey, isLiveVoiceConnected)
             AgentStateEntity(
                 agentId = id,
                 displayName = meta.first,
@@ -95,18 +96,22 @@ class MultiAgentOrchestrator(
                 MarketplaceToolEntity(
                     toolId = "tool_gemini_live_voice",
                     name = "Gemini Live Audio Bridge",
-                    description = "Real-time bidirectional audio-to-audio conversation with 8 male/female voices and tool calling.",
+                    description = "Real-time bidirectional audio-to-audio conversation over WebSocket with 8 voices and auto-detected bidiGenerateContent model.",
                     version = "2.5.0",
                     category = "Voice",
-                    sourceRepo = "builtin://teena/gemini-live",
+                    sourceRepo = "https://generativelanguage.googleapis.com",
                     licenseSpdx = "Apache-2.0",
-                    executionSpec = """{"model":"gemini-2.5-flash-native-audio-preview-12-2025"}""",
+                    executionSpec = """{"transport":"wss://generativelanguage.googleapis.com","method":"bidiGenerateContent"}""",
                     isBuiltIn = true,
                     isInstalled = true,
-                    activationStatus = if (perms.recordAudio) "ACTIVE" else "BLOCKED",
+                    activationStatus = if (perms.recordAudio && aiBrain.hasPrimaryGeminiApiKey()) "PARTIAL" else "BLOCKED",
                     securityScore = 100,
-                    securityNotes = "App Check attested Firebase AI Logic.",
-                    testResult = if (perms.recordAudio) "RECORD_AUDIO granted" else "Requires RECORD_AUDIO permission"
+                    securityNotes = "API key stored encrypted in Keystore vault.",
+                    testResult = when {
+                        !aiBrain.hasPrimaryGeminiApiKey() -> "Gemini API key missing"
+                        !perms.recordAudio -> "Requires RECORD_AUDIO permission"
+                        else -> "Ready; tap Start Live Audio to connect"
+                    }
                 ),
                 MarketplaceToolEntity(
                     toolId = "tool_github_inspector",
@@ -181,22 +186,35 @@ class MultiAgentOrchestrator(
         }
     }
 
-    suspend fun evaluateFeatureHealthMatrix(): List<FeatureHealthItem> {
+    suspend fun evaluateFeatureHealthMatrix(
+        isLiveVoiceConnected: Boolean = false,
+        liveVoiceModel: String? = null,
+        liveVoiceError: String? = null
+    ): List<FeatureHealthItem> {
         val perms = permissionManager.captureStatus()
         val slots = db.providerSlotDao().getSlotsOnce()
         val activeProviders = slots.count { it.lastTestStatus == "ACTIVE" || it.lastTestStatus == "READY" }
+        val hasGeminiKey = aiBrain.hasPrimaryGeminiApiKey()
         val hw = offlineEngine.inspectHardware()
+
+        val liveVoiceHealth = when {
+            !hasGeminiKey -> FeatureStatus.BLOCKED to "Gemini API key missing"
+            !perms.recordAudio -> FeatureStatus.BLOCKED to "Requires RECORD_AUDIO runtime permission."
+            isLiveVoiceConnected -> FeatureStatus.ACTIVE to "Live WebSocket audio connected (${liveVoiceModel ?: "auto-detected"})."
+            !liveVoiceError.isNullOrBlank() -> FeatureStatus.FAILED to liveVoiceError
+            else -> FeatureStatus.PARTIAL to "API key & mic ready; tap Start Live Audio to connect WebSocket."
+        }
 
         return listOf(
             FeatureHealthItem(
                 "ai_brain", "Multi-Provider AI Brain & Failover",
-                if (activeProviders > 0) FeatureStatus.ACTIVE else FeatureStatus.PARTIAL,
-                "$activeProviders provider slot(s) ready/verified; Keystore vault=${vault.isHardwareKeystoreAvailable}."
+                if (activeProviders > 0) FeatureStatus.ACTIVE else FeatureStatus.BLOCKED,
+                if (activeProviders > 0) "$activeProviders provider slot(s) ready/verified; Keystore vault=${vault.isHardwareKeystoreAvailable}." else "Gemini API key missing; configure a provider in API Manager."
             ),
             FeatureHealthItem(
                 "gemini_live", "Gemini Live Two-Way Voice",
-                if (perms.recordAudio) FeatureStatus.ACTIVE else FeatureStatus.BLOCKED,
-                if (perms.recordAudio) "RECORD_AUDIO granted & Gemini Live audio model configured." else "Requires RECORD_AUDIO runtime permission."
+                liveVoiceHealth.first,
+                liveVoiceHealth.second
             ),
             FeatureHealthItem(
                 "offline_ai", "Local / Offline AI Support",
@@ -458,11 +476,21 @@ class MultiAgentOrchestrator(
         return entry
     }
 
-    private fun evaluateAgentHealth(agentId: String, perms: com.example.system.PermissionSnapshot): Pair<FeatureStatus, String> {
+    private fun evaluateAgentHealth(
+        agentId: String,
+        perms: com.example.system.PermissionSnapshot,
+        hasGeminiKey: Boolean,
+        isLiveVoiceConnected: Boolean
+    ): Pair<FeatureStatus, String> {
         return when (agentId) {
             "agent_automation" -> if (perms.accessibilityEnabled) FeatureStatus.ACTIVE to "AccessibilityService bound" else FeatureStatus.BLOCKED to "Enable Accessibility in Android Settings"
             "agent_vision" -> if (perms.accessibilityEnabled || perms.camera) FeatureStatus.ACTIVE to "Vision & UI reader ready" else FeatureStatus.PARTIAL to "Requires Camera or Accessibility for full live capture"
-            "agent_voice" -> if (perms.recordAudio) FeatureStatus.ACTIVE to "RECORD_AUDIO granted for Gemini Live" else FeatureStatus.BLOCKED to "Requires RECORD_AUDIO permission"
+            "agent_voice" -> when {
+                !hasGeminiKey -> FeatureStatus.BLOCKED to "Gemini API key missing"
+                !perms.recordAudio -> FeatureStatus.BLOCKED to "Requires RECORD_AUDIO permission"
+                isLiveVoiceConnected -> FeatureStatus.ACTIVE to "Live audio session connected"
+                else -> FeatureStatus.PARTIAL to "Ready; start Live Voice to connect session"
+            }
             "agent_phone" -> if (perms.callPhone && perms.readContacts) FeatureStatus.ACTIVE to "Telecom & Contacts ready (Dialer=${perms.isDefaultDialer})" else FeatureStatus.PARTIAL to "Grant Contacts/Call permissions for full control"
             else -> FeatureStatus.ACTIVE to "Operational"
         }

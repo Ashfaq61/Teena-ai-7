@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import android.graphics.Bitmap
 import android.util.Base64
 import com.example.core.security.SecurityAuditor
 import kotlinx.coroutines.Dispatchers
@@ -10,6 +11,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -77,6 +79,8 @@ class TeenaNetworkClients {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    val modelRegistry: ModelRegistry = ModelRegistry(httpClient)
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun chatOpenAiCompatible(
@@ -135,27 +139,23 @@ class TeenaNetworkClients {
         apiKey: String,
         model: String,
         systemInstruction: String,
-        userPrompt: String
+        userPrompt: String,
+        recentHistory: List<Pair<String, String>> = emptyList(),
+        attachedImage: Bitmap? = null
     ): Result<OpenAiChatResult> = withContext(Dispatchers.IO) {
         runCatching {
+            val cleanKey = apiKey.trim()
+            if (cleanKey.isEmpty()) throw IllegalStateException("Gemini API key missing")
+            val cleanModel = model.removePrefix("models/").trim()
+            if (cleanModel.isEmpty()) throw IllegalStateException("No Gemini chat model selected.")
+
             val start = System.currentTimeMillis()
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
-            val payload = JSONObject().apply {
-                if (systemInstruction.isNotBlank()) {
-                    put("systemInstruction", JSONObject().apply {
-                        put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
-                    })
-                }
-                put("contents", JSONArray().put(
-                    JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().put(JSONObject().put("text", userPrompt)))
-                    }
-                ))
-            }
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent"
+            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage)
+
             val request = Request.Builder()
                 .url(url)
-                .addHeader("x-goog-api-key", apiKey)
+                .addHeader("x-goog-api-key", cleanKey)
                 .addHeader("Content-Type", "application/json")
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
@@ -163,25 +163,153 @@ class TeenaNetworkClients {
             httpClient.newCall(request).execute().use { resp ->
                 val bodyStr = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    val errMsg = extractJsonError(bodyStr) ?: "HTTP ${resp.code}"
+                    val errMsg = extractJsonError(bodyStr) ?: "Gemini HTTP ${resp.code}"
                     throw IllegalStateException(SecurityAuditor.redactSecrets(errMsg))
                 }
-                val json = JSONObject(bodyStr)
-                val text = json.optJSONArray("candidates")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("content")
-                    ?.optJSONArray("parts")
-                    ?.optJSONObject(0)
-                    ?.optString("text")
-                    .orEmpty()
+                val text = extractGeminiCandidateText(JSONObject(bodyStr))
                 if (text.isBlank()) throw IllegalStateException("Gemini REST returned empty content")
                 OpenAiChatResult(
                     text = text.trim(),
-                    modelUsed = model,
+                    modelUsed = cleanModel,
                     latencyMs = System.currentTimeMillis() - start
                 )
             }
         }
+    }
+
+    suspend fun streamGeminiDirectRest(
+        apiKey: String,
+        model: String,
+        systemInstruction: String,
+        userPrompt: String,
+        recentHistory: List<Pair<String, String>> = emptyList(),
+        attachedImage: Bitmap? = null,
+        onDelta: suspend (String) -> Unit
+    ): Result<OpenAiChatResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanKey = apiKey.trim()
+            if (cleanKey.isEmpty()) throw IllegalStateException("Gemini API key missing")
+            val cleanModel = model.removePrefix("models/").trim()
+            if (cleanModel.isEmpty()) throw IllegalStateException("No Gemini chat model selected.")
+
+            val start = System.currentTimeMillis()
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:streamGenerateContent?alt=sse"
+            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage)
+
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("x-goog-api-key", cleanKey)
+                .addHeader("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody(jsonMediaType))
+                .build()
+
+            httpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val errBody = resp.body?.string().orEmpty()
+                    val errMsg = extractJsonError(errBody) ?: "Gemini Stream HTTP ${resp.code}"
+                    throw IllegalStateException(SecurityAuditor.redactSecrets(errMsg))
+                }
+                val source = resp.body?.source() ?: throw IllegalStateException("Empty Gemini stream body")
+                val accumulated = StringBuilder()
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    if (line.startsWith("data:")) {
+                        val jsonStr = line.removePrefix("data:").trim()
+                        if (jsonStr.isEmpty() || jsonStr == "[DONE]") continue
+                        val chunkText = runCatching {
+                            extractGeminiCandidateText(JSONObject(jsonStr))
+                        }.getOrDefault("")
+                        if (chunkText.isNotEmpty()) {
+                            accumulated.append(chunkText)
+                            onDelta(accumulated.toString())
+                        }
+                    }
+                }
+                val finalText = accumulated.toString().trim()
+                if (finalText.isBlank()) {
+                    throw IllegalStateException("Gemini REST stream returned empty content")
+                }
+                OpenAiChatResult(
+                    text = finalText,
+                    modelUsed = cleanModel,
+                    latencyMs = System.currentTimeMillis() - start
+                )
+            }
+        }
+    }
+
+    private fun buildGeminiRestPayload(
+        systemInstruction: String,
+        recentHistory: List<Pair<String, String>>,
+        userPrompt: String,
+        attachedImage: Bitmap?
+    ): JSONObject {
+        val contentsArray = JSONArray()
+        recentHistory.takeLast(8).forEach { (role, msg) ->
+            if (msg.isNotBlank()) {
+                val mappedRole = if (role.equals("assistant", true) || role.equals("model", true)) "model" else "user"
+                contentsArray.put(
+                    JSONObject().apply {
+                        put("role", mappedRole)
+                        put("parts", JSONArray().put(JSONObject().put("text", msg.take(2500))))
+                    }
+                )
+            }
+        }
+        val currentParts = JSONArray().apply {
+            if (attachedImage != null) {
+                val scaled = scaleBitmapIfNeeded(attachedImage, 1024)
+                val baos = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, 85, baos)
+                val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                put(
+                    JSONObject().put(
+                        "inlineData",
+                        JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", b64)
+                        }
+                    )
+                )
+            }
+            put(JSONObject().put("text", userPrompt))
+        }
+        contentsArray.put(
+            JSONObject().apply {
+                put("role", "user")
+                put("parts", currentParts)
+            }
+        )
+        return JSONObject().apply {
+            if (systemInstruction.isNotBlank()) {
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
+                })
+            }
+            put("contents", contentsArray)
+        }
+    }
+
+    private fun extractGeminiCandidateText(json: JSONObject): String {
+        val parts = json.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+            ?: return ""
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val t = parts.optJSONObject(i)?.optString("text").orEmpty()
+            if (t.isNotEmpty()) sb.append(t)
+        }
+        return sb.toString()
+    }
+
+    private fun scaleBitmapIfNeeded(bitmap: Bitmap, maxDim: Int): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= maxDim && h <= maxDim) return bitmap
+        val ratio = maxDim.toFloat() / maxOf(w, h).toFloat()
+        return Bitmap.createScaledBitmap(bitmap, (w * ratio).toInt().coerceAtLeast(1), (h * ratio).toInt().coerceAtLeast(1), true)
     }
 
     suspend fun fetchGroqModels(apiKey: String): Result<List<DiscoveredModel>> =
