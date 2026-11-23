@@ -1,0 +1,6 @@
+{
+  "name": "Teena AI",
+  "description": "Autonomous multi-agent Android AI assistant with Gemini AI, multi-provider routing, voice interaction, Accessibility automation, research, and tool management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

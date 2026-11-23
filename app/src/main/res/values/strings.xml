@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Teena AI</string>
+    <string name="accessibility_service_description">Allows Teena AI to inspect visible screen UI elements, verify automation steps, and execute user-authorized taps, swipes, scrolling, and text input.</string>
+    <string name="notification_listener_description">Allows Teena AI to read incoming notifications, detect urgent messages, and prepare user-authorized replies.</string>
+    <string name="incall_service_description">Provides Teena AI Telecom call-state monitoring and user-authorized AI call assistance when set as active dialer/InCall handler.</string>
+    <string name="foreground_channel_name">Teena Background Engine</string>
+    <string name="alerts_channel_name">Teena Alerts &amp; Reminders</string>
+    <string name="builds_channel_name">Teena Build &amp; Research Updates</string>
+</resources>
