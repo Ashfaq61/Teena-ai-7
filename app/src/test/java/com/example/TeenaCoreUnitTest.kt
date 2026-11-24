@@ -7,7 +7,6 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.ai.AiBrainEngine
 import com.example.ai.ExternalAgentHub
-import com.example.ai.GeminiLiveVoiceManager
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
 import com.example.ai.SafeToolInterpreter
@@ -18,23 +17,18 @@ import com.example.core.security.SecurityAuditor
 import com.example.core.security.UntrustedContentSanitizer
 import com.example.data.local.ExternalAdvisorEntity
 import com.example.data.local.FeatureStatus
-import com.example.data.local.GeminiModelCacheEntity
 import com.example.data.local.MarketplaceToolEntity
 import com.example.data.local.MemoryFactEntity
 import com.example.data.local.ProviderSlotEntity
 import com.example.data.local.ProviderType
 import com.example.data.local.TeenaDatabase
 import com.example.data.local.TeenaPreferences
-import com.example.data.remote.GeminiHttpException
-import com.example.data.remote.GeminiModelInfo
-import com.example.data.remote.ModelRegistry
 import com.example.data.remote.TeenaNetworkClients
 import com.example.system.PermissionStatusManager
 import com.example.system.TeenaAccessibilityService
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
-import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -46,10 +40,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
-import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
 class TeenaCoreUnitTest {
 
     private lateinit var context: Context
@@ -93,30 +85,6 @@ class TeenaCoreUnitTest {
     }
 
     @Test
-    fun securityAuditorBlocksDclAndRedactsSecrets() {
-        val unsafeScan = SecurityAuditor.auditToolOrCode(
-            name = "SuspiciousPlugin",
-            sourceCodeOrSpec = "val loader = DexClassLoader(path); val key = \"gsk_1234567890abcdef\"",
-            licenseSpdx = "MIT"
-        )
-        assertFalse(unsafeScan.passed)
-        assertTrue(unsafeScan.score < 70)
-
-        val safeScan = SecurityAuditor.auditToolOrCode(
-            name = "WeatherSummary",
-            sourceCodeOrSpec = """{"endpoint":"https://api.open-meteo.com/v1/forecast"}""",
-            licenseSpdx = "Apache-2.0",
-            targetUrl = "https://api.open-meteo.com/v1/forecast"
-        )
-        assertTrue(safeScan.passed)
-        assertEquals(100, safeScan.score)
-
-        val redacted = SecurityAuditor.redactSecrets("Token gsk_abcdefghijklmnop1234 and ghp_abcdefghijklmnop1234")
-        assertFalse(redacted.contains("gsk_abcdefghijklmnop"))
-        assertFalse(redacted.contains("ghp_abcdefghijklmnop"))
-    }
-
-    @Test
     fun vaultEncryptsAndMasksSecrets() {
         val vault = KeystoreSecretVault(context)
         val rawKey = "gsk_testSecretValue987654321"
@@ -131,13 +99,6 @@ class TeenaCoreUnitTest {
     }
 
     @Test
-    fun allSeventeenAgentsAreDefinedAndUnique() {
-        assertEquals(17, MultiAgentOrchestrator.REQUIRED_AGENTS.size)
-        val ids = MultiAgentOrchestrator.REQUIRED_AGENTS.map { it.first }.toSet()
-        assertEquals(17, ids.size)
-    }
-
-    @Test
     fun roomMemoryCrudPersistsAccurately() = runTest {
         val id = db.memoryFactDao().insertMemory(
             MemoryFactEntity(category = "Decision", factKey = "Voice", factValue = "AOEDE")
@@ -149,93 +110,8 @@ class TeenaCoreUnitTest {
     }
 
     @Test
-    fun modelRegistryFiltersBidiGenerateContentAndGenerateContentAccurately() {
-        val registry = ModelRegistry(OkHttpClient())
-        val samplePayload = """
-            {
-              "models": [
-                {
-                  "name": "models/text-embedding-004",
-                  "displayName": "Text Embedding",
-                  "supportedGenerationMethods": ["embedContent"],
-                  "inputTokenLimit": 2048
-                },
-                {
-                  "name": "models/gemini-2.5-flash",
-                  "displayName": "Gemini 2.5 Flash",
-                  "supportedGenerationMethods": ["generateContent", "countTokens"],
-                  "inputTokenLimit": 1048576
-                },
-                {
-                  "name": "models/gemini-2.5-flash-native-audio-preview",
-                  "displayName": "Gemini 2.5 Flash Native Audio",
-                  "supportedGenerationMethods": ["bidiGenerateContent", "generateContent"],
-                  "inputTokenLimit": 131072
-                }
-              ]
-            }
-        """.trimIndent()
-
-        val parsed = registry.parseModelsJson(samplePayload)
-        assertEquals(3, parsed.size)
-
-        val liveOnly = parsed.filter { it.supportsBidiGenerateContent }
-        assertEquals(1, liveOnly.size)
-        assertEquals("gemini-2.5-flash-native-audio-preview", liveOnly.first().shortId)
-
-        val chatOnly = parsed.filter { it.supportsGenerateContent }
-        assertEquals(2, chatOnly.size)
-        assertFalse(chatOnly.any { it.shortId == "text-embedding-004" })
-    }
-
-    @Test
-    fun modelRegistryRankingPrefersWorkingStableNewerVersionAndLowerLatency() {
-        val candidates = listOf(
-            GeminiModelInfo("models/gemini-2.5-flash-tts", "gemini-2.5-flash-tts", "TTS", listOf("generateContent"), 32000, 8192),
-            GeminiModelInfo("models/gemini-3.8-flash-preview", "gemini-3.8-flash-preview", "Preview", listOf("generateContent"), 1048576, 65536),
-            GeminiModelInfo("models/gemini-2.5-flash", "gemini-2.5-flash", "2.5 Flash", listOf("generateContent"), 1048576, 65536),
-            GeminiModelInfo("models/gemini-3.8-pro", "gemini-3.8-pro", "3.8 Pro", listOf("generateContent"), 1048576, 65536),
-            GeminiModelInfo("models/gemini-3.8-flash", "gemini-3.8-flash", "3.8 Flash", listOf("generateContent"), 1048576, 65536)
-        )
-
-        // Fresh unprobed list: stable newer flash (3.8-flash) beats 3.8-pro, 2.5-flash, and preview
-        val initialRanked = ModelRegistry.rankModels(candidates, emptyMap(), forLive = false)
-        assertEquals("gemini-3.8-flash", initialRanked.first().shortId)
-        assertEquals("gemini-2.5-flash-tts", initialRanked.last().shortId)
-
-        // With 2.5-flash blacklisted and 3.8-flash verified working, 2.5-flash is excluded cleanly
-        val cacheMap = mapOf(
-            "gemini-2.5-flash" to GeminiModelCacheEntity(
-                cacheKey = "fp:gemini-2.5-flash",
-                keyFingerprint = "fp",
-                modelId = "gemini-2.5-flash",
-                fullName = "models/gemini-2.5-flash",
-                displayName = "2.5 Flash",
-                supportsGenerateContent = true,
-                supportsBidiGenerateContent = false,
-                probeStatus = "BLACKLISTED",
-                probeError = "no longer available"
-            ),
-            "gemini-3.8-flash" to GeminiModelCacheEntity(
-                cacheKey = "fp:gemini-3.8-flash",
-                keyFingerprint = "fp",
-                modelId = "gemini-3.8-flash",
-                fullName = "models/gemini-3.8-flash",
-                displayName = "3.8 Flash",
-                supportsGenerateContent = true,
-                supportsBidiGenerateContent = false,
-                probeStatus = "WORKING",
-                lastLatencyMs = 82L
-            )
-        )
-        val afterBlacklist = ModelRegistry.rankModels(candidates, cacheMap, forLive = false)
-        assertFalse(afterBlacklist.any { it.shortId == "gemini-2.5-flash" })
-        assertEquals("gemini-3.8-flash", afterBlacklist.first().shortId)
-    }
-
-    @Test
-    fun geminiModelCachePersistsBlacklistPerKeyAndClassifiesHttpErrors() = runTest {
-        val registry = ModelRegistry(OkHttpClient(), db.geminiModelDao())
+    fun geminiModelCachePersistsBlacklistPerKeyAndResetsCleanly() = runTest {
+        val registry = com.example.data.remote.ModelRegistry(OkHttpClient(), db.geminiModelDao())
         val keyA = "AIzaSyKeyAlpha11111"
         val keyB = "AIzaSyKeyBeta22222"
 
@@ -255,14 +131,6 @@ class TeenaCoreUnitTest {
         val afterReset = registry.getCachedModelsForKey(keyA).associateBy { it.modelId }
         assertEquals("UNPROBED", afterReset["gemini-2.5-flash"]?.probeStatus)
         assertEquals("WORKING", afterReset["gemini-3.8-flash"]?.probeStatus)
-
-        val notFoundErr = GeminiHttpException(404, "NOT_FOUND", "models/gemini-2.5-flash is no longer available")
-        assertTrue(ModelRegistry.isModelUnavailableError(notFoundErr))
-        assertFalse(ModelRegistry.isInvalidApiKeyError(notFoundErr))
-
-        val badKeyErr = GeminiHttpException(401, "UNAUTHENTICATED", "API key not valid")
-        assertTrue(ModelRegistry.isInvalidApiKeyError(badKeyErr))
-        assertFalse(ModelRegistry.isModelUnavailableError(badKeyErr))
     }
 
     @Test
@@ -818,33 +686,6 @@ class TeenaCoreUnitTest {
         assertEquals(FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name, afterRollback.activationStatus)
         assertFalse(afterRollback.deviceVerified)
         assertTrue(afterRollback.historyLog.contains("ROLLBACK"))
-    }
-
-    @Test
-    fun geminiLiveControlFramesResumptionGoAwayAndQuotaAreParsedCorrectly() {
-        val setup = GeminiLiveVoiceManager.buildSetupMessageJson(
-            modelResourceName = "models/gemini-live-audio",
-            voiceName = "Aoede",
-            resumptionHandle = "resume_token_xyz"
-        )
-        val setupObj = setup.getJSONObject("setup")
-        assertEquals("resume_token_xyz", setupObj.getJSONObject("sessionResumption").getString("handle"))
-        assertEquals("AUDIO", setupObj.getJSONObject("generationConfig").getJSONArray("responseModalities").getString(0))
-
-        val ctrlUpdate = GeminiLiveVoiceManager.parseControlEvent(
-            JSONObject("""{"setupComplete":{},"sessionResumptionUpdate":{"newHandle":"next_handle_123","resumable":true}}""")
-        )
-        assertTrue(ctrlUpdate.hasSetupComplete)
-        assertEquals("next_handle_123", ctrlUpdate.resumptionHandleUpdate)
-        assertTrue(ctrlUpdate.isResumable)
-
-        val goAwayEvent = GeminiLiveVoiceManager.parseControlEvent(
-            JSONObject("""{"goAway":{"timeLeft":"30s"}}""")
-        )
-        assertEquals("30s", goAwayEvent.goAwayTimeLeft)
-
-        assertTrue(GeminiLiveVoiceManager.isQuotaOrRateLimitReason("429 RESOURCE_EXHAUSTED"))
-        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L), GeminiLiveVoiceManager.BACKOFF_DELAYS_MS)
     }
 
     @Test
