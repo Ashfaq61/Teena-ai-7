@@ -21,11 +21,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Temurin Java 17
+      - name: Set up Temurin Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Verify Java environment
         run: |
@@ -54,8 +54,8 @@ jobs:
           fi
 
           echo "Detected Java major version: ${MAJOR_VERSION}"
-          if [ "$MAJOR_VERSION" -lt 17 ]; then
-            echo "::error::Java 17 or newer is required, but detected Java ${MAJOR_VERSION}."
+          if [ "$MAJOR_VERSION" -lt 21 ]; then
+            echo "::error::Java 21 or newer is required, but detected Java ${MAJOR_VERSION}."
             exit 1
           fi
 
@@ -64,130 +64,155 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Configure APK signing (TEENA_KEYSTORE or temporary debug key)
+      - name: Configure TEENA_SIGNING keystore
         env:
-          TEENA_KEYSTORE_B64: ${{ secrets.TEENA_KEYSTORE }}
-          TEENA_KEYSTORE_ALT_B64: ${{ secrets.TEENA_KEYSTORE_BASE64 }}
-          TEENA_KEYSTORE_PASS: ${{ secrets.TEENA_KEYSTORE_PASSWORD }}
-          TEENA_KEY_PASS: ${{ secrets.TEENA_KEY_PASSWORD }}
-          TEENA_KEY_ALIAS_SECRET: ${{ secrets.TEENA_KEY_ALIAS }}
+          TEENA_SIGNING: ${{ secrets.TEENA_SIGNING }}
         run: |
           set -euo pipefail
+          if [ -z "${TEENA_SIGNING:-}" ]; then
+            echo "::error::TEENA_SIGNING secret missing, update install nahi hoga"
+            exit 1
+          fi
+
+          case "$TEENA_SIGNING" in
+            *:*) ;;
+            *)
+              echo "::error::TEENA_SIGNING secret missing, update install nahi hoga"
+              exit 1
+              ;;
+          esac
+
+          SIGNING_PASSWORD="$(printf '%s' "$TEENA_SIGNING" | cut -d: -f1)"
+          SIGNING_BASE64="$(printf '%s' "$TEENA_SIGNING" | cut -d: -f2-)"
+
+          if [ -z "$SIGNING_PASSWORD" ] || [ -z "$SIGNING_BASE64" ]; then
+            echo "::error::TEENA_SIGNING secret missing, update install nahi hoga"
+            exit 1
+          fi
+
+          printf '::add-mask::%s\n' "$SIGNING_PASSWORD"
+
           KEYTOOL_BIN="${JAVA_HOME:-}/bin/keytool"
           if [ ! -x "$KEYTOOL_BIN" ]; then
             echo "::error::keytool executable not found under configured JAVA_HOME (${JAVA_HOME:-<unset>})."
             exit 1
           fi
 
-          EFFECTIVE_B64="${TEENA_KEYSTORE_B64:-${TEENA_KEYSTORE_ALT_B64:-}}"
-          if [ -n "$EFFECTIVE_B64" ] && [ -n "$TEENA_KEYSTORE_PASS" ] && [ -n "$TEENA_KEY_PASS" ]; then
-            RELEASE_KEYSTORE_PATH="${RUNNER_TEMP}/teena-release-keystore.jks"
-            printf '%s' "$EFFECTIVE_B64" | tr -d '\r\n ' | base64 -d > "$RELEASE_KEYSTORE_PATH"
+          KEYSTORE_FILE="${GITHUB_WORKSPACE}/teena.jks"
+          printf '%s' "$SIGNING_BASE64" | tr -d '\r\n ' | base64 -d > "$KEYSTORE_FILE"
 
-            if [ ! -s "$RELEASE_KEYSTORE_PATH" ]; then
-              echo "::error::Decoded TEENA_KEYSTORE is empty."
-              exit 1
-            fi
-
-            # app/build.gradle.kts release signingConfig expects keyAlias "upload".
-            # If the provided keystore uses another alias, remap it in the temporary runner copy.
-            EXISTING_ALIASES="$("$KEYTOOL_BIN" -list -keystore "$RELEASE_KEYSTORE_PATH" -storepass "$TEENA_KEYSTORE_PASS" 2>/dev/null | sed -nE 's/^([^,]+), [0-9]{4}.*/\1/p' || true)"
-            if ! printf '%s\n' "$EXISTING_ALIASES" | grep -Fxq "upload"; then
-              SOURCE_ALIAS="${TEENA_KEY_ALIAS_SECRET:-$(printf '%s\n' "$EXISTING_ALIASES" | head -n 1)}"
-              if [ -n "$SOURCE_ALIAS" ]; then
-                "$KEYTOOL_BIN" -changealias \
-                  -alias "$SOURCE_ALIAS" \
-                  -destalias "upload" \
-                  -keystore "$RELEASE_KEYSTORE_PATH" \
-                  -storepass "$TEENA_KEYSTORE_PASS" \
-                  -keypass "$TEENA_KEY_PASS"
-              fi
-            fi
-
-            # Also keep debug.keystore available for Gradle unit/variant evaluation
-            if [ ! -f "./debug.keystore" ]; then
-              "$KEYTOOL_BIN" -genkeypair \
-                -keystore "./debug.keystore" \
-                -storepass "android" \
-                -alias "androiddebugkey" \
-                -keypass "android" \
-                -dname "CN=Android Debug,O=Android,C=US" \
-                -keyalg "RSA" \
-                -keysize 2048 \
-                -validity 10000 \
-                -noprompt
-            fi
-
-            {
-              echo "KEYSTORE_PATH=${RELEASE_KEYSTORE_PATH}"
-              echo "STORE_PASSWORD=${TEENA_KEYSTORE_PASS}"
-              echo "KEY_PASSWORD=${TEENA_KEY_PASS}"
-              echo "SIGNING_MODE=TEENA_KEYSTORE_RELEASE"
-              echo "SIGNING_LABEL=SIGNED_RELEASE (TEENA_KEYSTORE)"
-              echo "APK_GRADLE_TASK=:app:assembleRelease"
-              echo "EXPECTED_APK=app/build/outputs/apk/release/app-release.apk"
-              echo "ASSET_VARIANT=signed-release"
-            } >> "$GITHUB_ENV"
-            echo "Configured signed RELEASE APK build using TEENA_KEYSTORE secrets."
-          else
-            if [ ! -f "./debug.keystore" ]; then
-              "$KEYTOOL_BIN" -genkeypair \
-                -keystore "./debug.keystore" \
-                -storepass "android" \
-                -alias "androiddebugkey" \
-                -keypass "android" \
-                -dname "CN=Android Debug,O=Android,C=US" \
-                -keyalg "RSA" \
-                -keysize 2048 \
-                -validity 10000 \
-                -noprompt
-            fi
-
-            {
-              echo "SIGNING_MODE=TEMPORARY_DEBUG_KEY"
-              echo "SIGNING_LABEL=TEMPORARY_KEY (Testing Only - TEENA_KEYSTORE secrets not configured)"
-              echo "APK_GRADLE_TASK=:app:assembleDebug"
-              echo "EXPECTED_APK=app/build/outputs/apk/debug/app-debug.apk"
-              echo "ASSET_VARIANT=temporary-key-debug"
-            } >> "$GITHUB_ENV"
-            echo "TEENA_KEYSTORE secrets absent; configured TEMPORARY_KEY debug APK build."
-          fi
-
-      - name: Run unit & Robolectric tests
-        run: gradle :app:testDebugUnitTest --stacktrace --no-daemon
-
-      - name: Build APK
-        run: gradle "$APK_GRADLE_TASK" --stacktrace --no-daemon
-
-      - name: Verify built APK
-        run: |
-          set -euo pipefail
-          if [ ! -f "$EXPECTED_APK" ] || [ ! -s "$EXPECTED_APK" ]; then
-            echo "::error::Expected APK not found or empty at ${EXPECTED_APK}."
-            find "app/build/outputs/apk" -type f -name '*.apk' -print 2>/dev/null || true
+          if [ ! -s "$KEYSTORE_FILE" ]; then
+            echo "::error::Decoded teena.jks is empty."
             exit 1
           fi
 
-          APK_BYTES="$(wc -c < "$EXPECTED_APK" | tr -d ' ')"
-          echo "Verified APK (${SIGNING_LABEL}): ${EXPECTED_APK} (${APK_BYTES} bytes)"
+          export TEENA_VERIFY_PASS="$SIGNING_PASSWORD"
+          if ! "$KEYTOOL_BIN" -list -keystore "$KEYSTORE_FILE" -alias "teena" -storepass:env TEENA_VERIFY_PASS >/dev/null 2>&1; then
+            echo "::error::teena.jks failed verification for alias 'teena'."
+            exit 1
+          fi
 
-      - name: Upload APK artifact
+          INIT_SCRIPT="${RUNNER_TEMP}/teena-signing.init.gradle"
+          cat > "$INIT_SCRIPT" << 'GRADLE_EOF'
+          beforeProject { proj ->
+              proj.plugins.withId("com.android.application") {
+                  def ksPath = System.getenv("TEENA_KEYSTORE_PATH")
+                  def ksPass = System.getenv("TEENA_KEYSTORE_PASS")
+                  def ksAlias = System.getenv("TEENA_KEYSTORE_ALIAS")
+                  if (ksPath && ksPass && ksAlias) {
+                      def androidComp = proj.extensions.findByName("androidComponents")
+                      androidComp.finalizeDsl { ext ->
+                          ext.signingConfigs.configureEach { cfg ->
+                              cfg.storeFile = proj.file(ksPath)
+                              cfg.storePassword = ksPass
+                              cfg.keyAlias = ksAlias
+                              cfg.keyPassword = ksPass
+                          }
+                      }
+                  }
+              }
+          }
+          GRADLE_EOF
+
+          {
+            echo "TEENA_KEYSTORE_PATH=${KEYSTORE_FILE}"
+            echo "TEENA_KEYSTORE_PASS=${SIGNING_PASSWORD}"
+            echo "TEENA_KEYSTORE_ALIAS=teena"
+            echo "TEENA_INIT_SCRIPT=${INIT_SCRIPT}"
+            echo "SIGNING_LABEL=SIGNED_TEENA_JKS (alias: teena)"
+            echo "RELEASE_APK=app/build/outputs/apk/release/app-release.apk"
+            echo "DEBUG_APK=app/build/outputs/apk/debug/app-debug.apk"
+          } >> "$GITHUB_ENV"
+
+          echo "Configured teena.jks signing for both debug and release builds (alias: teena)."
+
+      - name: Run unit & Robolectric tests
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: gradle :app:testDebugUnitTest --init-script "$TEENA_INIT_SCRIPT" --stacktrace --no-daemon
+
+      - name: Build signed Debug and Release APKs
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: gradle :app:assembleDebug :app:assembleRelease --init-script "$TEENA_INIT_SCRIPT" --stacktrace --no-daemon
+
+      - name: Verify built APKs and print signing certificate SHA-256
+        id: verify_apks
+        run: |
+          set -euo pipefail
+          for APK_PATH in "$RELEASE_APK" "$DEBUG_APK"; do
+            if [ ! -f "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+              echo "::error::Expected APK not found or empty at ${APK_PATH}."
+              find "app/build/outputs/apk" -type f -name '*.apk' -print 2>/dev/null || true
+              exit 1
+            fi
+            APK_BYTES="$(wc -c < "$APK_PATH" | tr -d ' ')"
+            echo "Verified APK (${SIGNING_LABEL}): ${APK_PATH} (${APK_BYTES} bytes)"
+          done
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER_BIN=""
+          if [ -n "$SDK_ROOT" ] && [ -d "${SDK_ROOT}/build-tools" ]; then
+            APKSIGNER_BIN="$(find "${SDK_ROOT}/build-tools" -maxdepth 2 -type f -name 'apksigner' 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+
+          CERT_SHA256=""
+          if [ -n "$APKSIGNER_BIN" ] && [ -x "$APKSIGNER_BIN" ]; then
+            echo "=== Release APK Signature ==="
+            "$APKSIGNER_BIN" verify --print-certs --verbose "$RELEASE_APK"
+            echo "=== Debug APK Signature ==="
+            "$APKSIGNER_BIN" verify --print-certs --verbose "$DEBUG_APK"
+            CERT_SHA256="$("$APKSIGNER_BIN" verify --print-certs "$RELEASE_APK" | sed -nE 's/.*SHA-256 digest: ([0-9a-fA-F:]+).*/\1/p' | head -n 1 || true)"
+          else
+            KEYTOOL_BIN="${JAVA_HOME:-}/bin/keytool"
+            echo "=== Release APK Certificate ==="
+            "$KEYTOOL_BIN" -printcert -jarfile "$RELEASE_APK"
+            echo "=== Debug APK Certificate ==="
+            "$KEYTOOL_BIN" -printcert -jarfile "$DEBUG_APK"
+            CERT_SHA256="$("$KEYTOOL_BIN" -printcert -jarfile "$RELEASE_APK" | sed -nE 's/.*SHA256:[[:space:]]*([0-9A-Fa-f:]+).*/\1/p' | head -n 1 || true)"
+          fi
+
+          if [ -z "$CERT_SHA256" ]; then
+            CERT_SHA256="$("${JAVA_HOME}/bin/keytool" -list -v -keystore "$TEENA_KEYSTORE_PATH" -alias "$TEENA_KEYSTORE_ALIAS" -storepass:env TEENA_KEYSTORE_PASS | sed -nE 's/.*SHA256:[[:space:]]*([0-9A-Fa-f:]+).*/\1/p' | head -n 1 || true)"
+          fi
+
+          echo "Signing Certificate SHA-256: ${CERT_SHA256}"
+          echo "cert_sha256=${CERT_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed APKs artifact
         id: upload_apk
         uses: actions/upload-artifact@v4
         with:
-          name: teena-apk-artifact
-          path: ${{ env.EXPECTED_APK }}
+          name: teena-apk-artifacts
+          path: |
+            ${{ env.RELEASE_APK }}
+            ${{ env.DEBUG_APK }}
           if-no-files-found: error
 
-      - name: Prepare APK release asset
+      - name: Prepare APK release assets
         id: prepare_asset
         run: |
           set -euo pipefail
-          if [ ! -f "$EXPECTED_APK" ] || [ ! -s "$EXPECTED_APK" ]; then
-            echo "::error::Verified APK missing at ${EXPECTED_APK}."
-            exit 1
-          fi
-
           RAW_REPO="${GITHUB_REPOSITORY#*/}"
           SAFE_REPO="$(printf '%s' "$RAW_REPO" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
           if [ -z "$SAFE_REPO" ]; then
@@ -195,23 +220,30 @@ jobs:
           fi
 
           RELEASE_ASSET_DIR="$(mktemp -d "${RUNNER_TEMP}/release-asset.XXXXXX")"
-          RELEASE_ASSET_NAME="${SAFE_REPO}-${ASSET_VARIANT}-build-${GITHUB_RUN_NUMBER}.apk"
+          RELEASE_ASSET_NAME="${SAFE_REPO}-release-build-${GITHUB_RUN_NUMBER}.apk"
+          DEBUG_ASSET_NAME="${SAFE_REPO}-debug-build-${GITHUB_RUN_NUMBER}.apk"
           RELEASE_ASSET_PATH="${RELEASE_ASSET_DIR}/${RELEASE_ASSET_NAME}"
+          DEBUG_ASSET_PATH="${RELEASE_ASSET_DIR}/${DEBUG_ASSET_NAME}"
 
-          cp "$EXPECTED_APK" "$RELEASE_ASSET_PATH"
+          cp "$RELEASE_APK" "$RELEASE_ASSET_PATH"
+          cp "$DEBUG_APK" "$DEBUG_ASSET_PATH"
 
-          if [ ! -f "$RELEASE_ASSET_PATH" ] || [ ! -s "$RELEASE_ASSET_PATH" ]; then
-            echo "::error::Prepared release asset missing or empty at ${RELEASE_ASSET_PATH}."
-            exit 1
-          fi
+          for ASSET_FILE in "$RELEASE_ASSET_PATH" "$DEBUG_ASSET_PATH"; do
+            if [ ! -f "$ASSET_FILE" ] || [ ! -s "$ASSET_FILE" ]; then
+              echo "::error::Prepared release asset missing or empty at ${ASSET_FILE}."
+              exit 1
+            fi
+          done
 
           {
             echo "asset_path=${RELEASE_ASSET_PATH}"
             echo "asset_name=${RELEASE_ASSET_NAME}"
+            echo "debug_asset_path=${DEBUG_ASSET_PATH}"
+            echo "debug_asset_name=${DEBUG_ASSET_NAME}"
           } >> "$GITHUB_OUTPUT"
-          echo "Prepared release asset filename: ${RELEASE_ASSET_NAME}"
+          echo "Prepared release assets: ${RELEASE_ASSET_NAME}, ${DEBUG_ASSET_NAME}"
 
-      - name: Publish APK to GitHub Releases
+      - name: Publish APKs to GitHub Releases
         id: create_release
         continue-on-error: true
         env:
@@ -222,25 +254,30 @@ jobs:
 
           ASSET_PATH="${{ steps.prepare_asset.outputs.asset_path }}"
           ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
+          DEBUG_ASSET_PATH="${{ steps.prepare_asset.outputs.debug_asset_path }}"
+          DEBUG_ASSET_NAME="${{ steps.prepare_asset.outputs.debug_asset_name }}"
+          CERT_SHA256="${{ steps.verify_apks.outputs.cert_sha256 }}"
 
           if [ -z "$ASSET_PATH" ] || [ ! -f "$ASSET_PATH" ] || [ ! -s "$ASSET_PATH" ]; then
             echo "::error::Prepared release asset is missing or empty; skipping release creation."
             exit 1
           fi
 
-          RELEASE_TAG="${ASSET_VARIANT}-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          RELEASE_TAG="teena-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           RELEASE_TAG="$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]')"
-          RELEASE_TITLE="Teena AI APK #${GITHUB_RUN_NUMBER} [${SIGNING_MODE}]"
+          RELEASE_TITLE="Teena AI APK #${GITHUB_RUN_NUMBER}"
           NOTES_FILE="${RUNNER_TEMP}/release-notes-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}.md"
 
           cat > "$NOTES_FILE" <<EOF
           Automated Android build from GitHub Actions (\`${GITHUB_REF_NAME}\`).
 
           - **Signing Status**: ${SIGNING_LABEL}
+          - **Signing Cert SHA-256**: \`${CERT_SHA256}\`
+          - **Version Code**: ${GITHUB_RUN_NUMBER}
           - **Unit Tests**: Passed (\`:app:testDebugUnitTest\`)
-          - **Workflow Run Number**: ${GITHUB_RUN_NUMBER}
           - **Source Commit SHA**: ${GITHUB_SHA}
-          - **Release Asset**: ${ASSET_NAME}
+          - **Release APK**: ${ASSET_NAME}
+          - **Debug APK**: ${DEBUG_ASSET_NAME}
           EOF
 
           {
@@ -248,7 +285,7 @@ jobs:
             echo "release_title=${RELEASE_TITLE}"
           } >> "$GITHUB_OUTPUT"
 
-          gh release create "$RELEASE_TAG" "$ASSET_PATH" \
+          gh release create "$RELEASE_TAG" "$ASSET_PATH" "$DEBUG_ASSET_PATH" \
             --title "$RELEASE_TITLE" \
             --target "${GITHUB_SHA}" \
             --notes-file "$NOTES_FILE" \
@@ -269,6 +306,7 @@ jobs:
           RELEASE_TITLE="${{ steps.create_release.outputs.release_title }}"
           RAW_ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
           ASSET_NAME="$(printf '%s' "$RAW_ASSET_NAME" | tr ' ' '-')"
+          CERT_SHA256="${{ steps.verify_apks.outputs.cert_sha256 }}"
 
           if [ "$RELEASE_OUTCOME" = "success" ]; then
             if [ -z "$RELEASE_TAG" ]; then
@@ -304,6 +342,7 @@ jobs:
             fi
 
             echo "Signing Mode: ${SIGNING_LABEL}"
+            echo "Signing Certificate SHA-256: ${CERT_SHA256}"
             echo "Release Tag: ${RELEASE_TAG}"
             echo "Release Title: ${CONFIRMED_TITLE:-$RELEASE_TITLE}"
             echo "GitHub Release URL: ${RELEASE_URL}"
@@ -313,23 +352,29 @@ jobs:
               echo "### Teena AI APK Build & Release Summary"
               echo ""
               echo "- **Signing Status**: ${SIGNING_LABEL}"
+              echo "- **Signing Cert SHA-256**: \`${CERT_SHA256}\`"
+              echo "- **Version Code**: ${GITHUB_RUN_NUMBER}"
               echo "- **Unit Tests**: Passed (\`:app:testDebugUnitTest\`)"
               echo "- **Release Tag**: \`${RELEASE_TAG}\`"
               echo "- **Release Title**: ${CONFIRMED_TITLE:-$RELEASE_TITLE}"
-              echo "- **APK Asset Filename**: \`${CONFIRMED_ASSET}\`"
+              echo "- **Primary APK Asset**: \`${CONFIRMED_ASSET}\`"
               echo "- **Direct GitHub Release URL**: ${RELEASE_URL}"
             } >> "$GITHUB_STEP_SUMMARY"
           elif [ "$UPLOAD_OUTCOME" = "success" ]; then
-            echo "::warning::GitHub Release publishing failed; APK artifact 'teena-apk-artifact' (${SIGNING_LABEL}) remains available."
+            echo "::warning::GitHub Release publishing failed; APK artifact 'teena-apk-artifacts' (${SIGNING_LABEL}) remains available."
             {
               echo "### Teena AI APK Build Summary"
               echo ""
               echo "> **Warning**: GitHub Release publishing failed, so no release URL was published."
               echo ""
               echo "- **Signing Status**: ${SIGNING_LABEL}"
-              echo "- **APK Path**: \`${EXPECTED_APK}\`"
-              echo "- **Backup Download**: Download \`teena-apk-artifact\` from Workflow Artifacts."
+              echo "- **Signing Cert SHA-256**: \`${CERT_SHA256}\`"
+              echo "- **Backup Download**: Download \`teena-apk-artifacts\` from Workflow Artifacts."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::APK build or artifact upload did not complete."
           fi
+
+      - name: Clean up decoded keystore
+        if: always()
+        run: rm -f "${GITHUB_WORKSPACE}/teena.jks"

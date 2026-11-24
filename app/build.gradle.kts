@@ -13,7 +13,7 @@ android {
     applicationId = "com.aistudio.teenaai.qx7mzk"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
+    versionCode = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull?.toIntOrNull() ?: 1
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
