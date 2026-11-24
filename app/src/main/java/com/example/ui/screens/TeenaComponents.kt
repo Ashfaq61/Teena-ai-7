@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.data.local.FeatureStatus
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
 import com.example.ui.theme.StatusAmber
@@ -59,13 +60,18 @@ fun StatusPill(
     status: String,
     modifier: Modifier = Modifier
 ) {
+    val label = if (status == FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name) {
+        FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.displayLabel
+    } else {
+        status.replace("_", " ").uppercase()
+    }
     val upper = status.uppercase()
     val (bg, fg) = when {
         upper in setOf("ACTIVE", "VERIFIED", "SUCCESS", "COMPLETED", "PASSED", "READY") ->
             NeuralMint.copy(alpha = 0.16f) to NeuralMint
-        upper in setOf("PARTIAL", "WORKING", "CONNECTING", "RECONNECTING", "RUNNING", "LISTENING", "SPEAKING", "THINKING") ->
+        upper in setOf("PARTIAL", "WORKING", "CONNECTING", "RECONNECTING", "RUNNING", "LISTENING", "SPEAKING", "THINKING", "WAITING_APPROVAL", "PROPOSED") ->
             StatusAmber.copy(alpha = 0.18f) to StatusAmber
-        upper in setOf("BLOCKED", "FAILED", "ERROR", "DENIED") ->
+        upper in setOf("BLOCKED", "FAILED", "ERROR", "DENIED", "HALTED", "STOPPED", "EMERGENCY_STOP", "ROLLED_BACK") ->
             StatusCrimson.copy(alpha = 0.18f) to StatusCrimson
         else -> NeuralCyan.copy(alpha = 0.15f) to NeuralCyan
     }
@@ -76,7 +82,7 @@ fun StatusPill(
         border = BorderStroke(1.dp, fg.copy(alpha = 0.45f))
     ) {
         Text(
-            text = upper,
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
             color = fg,

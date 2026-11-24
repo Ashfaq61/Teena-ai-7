@@ -157,7 +157,7 @@ fun VoiceAssistantScreen(viewModel: TeenaViewModel) {
 
                     Text(
                         text = liveVoiceModel?.let { "Connected Live Model: $it" }
-                            ?: "Live Model: Auto-detected from ModelRegistry on connect",
+                            ?: "Live Model: Resolved from ModelRegistry (bidiGenerateContent)",
                         style = MaterialTheme.typography.labelMedium,
                         color = if (liveVoiceModel != null) NeuralMint else NeuralCyan
                     )

@@ -30,13 +30,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.ProviderType
+import com.example.data.remote.ModelRegistry
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
+import com.example.ui.theme.StatusCrimson
 import com.example.ui.viewmodel.TeenaViewModel
 
 @Composable
 fun ApiManagerScreen(viewModel: TeenaViewModel) {
     val slots by viewModel.providerSlots.collectAsStateWithLifecycle()
+    val modelCache by viewModel.geminiModelCache.collectAsStateWithLifecycle()
     val discovered by viewModel.discoveredModels.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
 
@@ -94,7 +97,7 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                     label = {
                         Text(
                             if (selectedType == ProviderType.GEMINI_DIRECT) {
-                                "Model ID (leave blank to auto-detect via ModelRegistry)"
+                                "Model ID (optional — leaves ModelRegistry selection)"
                             } else {
                                 "Model ID (leave blank for default)"
                             }
@@ -157,11 +160,28 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
         items(slots, key = { it.slotId }) { slot ->
             val hasSecret = viewModel.container.vault.hasSecret(slot.slotId)
             val isOffline = slot.providerType == ProviderType.OFFLINE_LOCAL.name
+            val isGemini = slot.providerType == ProviderType.GEMINI_DIRECT.name
             val masked = when {
                 isOffline -> "On-device deterministic engine (no key needed)"
                 hasSecret -> viewModel.container.vault.maskedPreview(slot.slotId)
-                slot.providerType == ProviderType.GEMINI_DIRECT.name -> "Gemini API key missing"
+                isGemini -> "Gemini API key missing"
                 else -> "No key stored"
+            }
+
+            val keyFingerprint = if (isGemini && hasSecret) {
+                viewModel.container.vault.readSecret(slot.slotId)?.let { ModelRegistry.keyFingerprint(it) }.orEmpty()
+            } else ""
+            val cachedForKey = if (keyFingerprint.isNotEmpty()) {
+                modelCache.filter { it.keyFingerprint == keyFingerprint }
+            } else emptyList()
+            val blacklistedForKey = cachedForKey.filter { it.probeStatus == "BLACKLISTED" }
+            val workingForKey = cachedForKey
+                .filter { it.supportsGenerateContent && it.probeStatus == "WORKING" }
+                .minByOrNull { it.lastLatencyMs }
+                ?.modelId
+
+            val displayedModel = slot.selectedModel.trim().ifBlank {
+                workingForKey ?: "Not selected (tap Test to probe ModelRegistry)"
             }
 
             NeuralCard(borderColor = if (slot.isPrimary) NeuralCyan else MaterialTheme.colorScheme.outline) {
@@ -169,15 +189,35 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                     Column(Modifier.weight(1f)) {
                         Text(slot.label, style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "Model: ${slot.selectedModel.ifBlank { "Auto-detect via ModelRegistry" }}",
+                            text = "Model: $displayedModel",
                             style = MaterialTheme.typography.labelMedium,
                             color = NeuralCyan
                         )
                         Text("Key: $masked", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (slot.lastLatencyMs > 0) {
+                            Text("Latency: ${slot.lastLatencyMs}ms", style = MaterialTheme.typography.labelSmall, color = NeuralMint)
+                        }
                     }
                     StatusPill(slot.lastTestStatus)
                 }
                 Text(slot.lastTestMessage, style = MaterialTheme.typography.bodySmall)
+
+                if (blacklistedForKey.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Blacklisted Models (${blacklistedForKey.size}):",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StatusCrimson
+                        )
+                        blacklistedForKey.take(5).forEach { b ->
+                            Text(
+                                text = "• ${b.modelId}: ${b.probeError.ifBlank { "Unavailable" }}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
 
                 if (editingKeySlotId == slot.slotId) {
                     OutlinedTextField(
@@ -203,32 +243,47 @@ fun ApiManagerScreen(viewModel: TeenaViewModel) {
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = { viewModel.testProviderSlot(slot) }) {
-                        Text("Test")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilledTonalButton(onClick = { viewModel.testProviderSlot(slot) }) {
+                            Text("Test")
+                        }
                     }
                     if (!isOffline) {
-                        OutlinedButton(onClick = {
-                            editingKeySlotId = if (editingKeySlotId == slot.slotId) null else slot.slotId
-                            editingKeyDraft = ""
-                        }) {
-                            Text(if (hasSecret) "Edit Key" else "Set Key")
+                        item {
+                            OutlinedButton(onClick = {
+                                editingKeySlotId = if (editingKeySlotId == slot.slotId) null else slot.slotId
+                                editingKeyDraft = ""
+                            }) {
+                                Text(if (hasSecret) "Edit Key" else "Set Key")
+                            }
                         }
                     }
                     if (!slot.isPrimary) {
-                        OutlinedButton(onClick = { viewModel.setPrimarySlot(slot.slotId) }) {
-                            Text("Set Primary")
+                        item {
+                            OutlinedButton(onClick = { viewModel.setPrimarySlot(slot.slotId) }) {
+                                Text("Set Primary")
+                            }
                         }
                     } else {
-                        StatusPill("PRIMARY")
+                        item { StatusPill("PRIMARY") }
                     }
                     if (slot.providerType == ProviderType.GROQ.name ||
                         slot.providerType == ProviderType.GEMINI_DIRECT.name ||
                         slot.providerType == ProviderType.OPENROUTER.name
                     ) {
-                        OutlinedButton(onClick = {
-                            viewModel.discoverModels(ProviderType.valueOf(slot.providerType), slot.slotId)
-                        }) { Text("Models") }
+                        item {
+                            OutlinedButton(onClick = {
+                                viewModel.discoverModels(ProviderType.valueOf(slot.providerType), slot.slotId)
+                            }) { Text("Models") }
+                        }
+                    }
+                    if (blacklistedForKey.isNotEmpty()) {
+                        item {
+                            OutlinedButton(onClick = { viewModel.resetGeminiBlacklist(slot.slotId) }) {
+                                Text("Clear Blacklist")
+                            }
+                        }
                     }
                 }
             }

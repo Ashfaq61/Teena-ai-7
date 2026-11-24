@@ -1,5 +1,6 @@
 package com.example.system
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraCharacteristics
@@ -7,11 +8,26 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
+import androidx.camera.core.ImageCapture
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+sealed interface CameraVideoTarget {
+    data class MediaStoreTarget(val options: MediaStoreOutputOptions) : CameraVideoTarget
+    data class FileTarget(val options: FileOutputOptions, val file: File) : CameraVideoTarget
+}
 
 class CameraMediaEngine(private val context: Context) {
 
@@ -20,6 +36,72 @@ class CameraMediaEngine(private val context: Context) {
 
     private val _torchEnabled = MutableStateFlow(false)
     val torchEnabled: StateFlow<Boolean> = _torchEnabled.asStateFlow()
+
+    fun availableCameraCount(): Int {
+        return runCatching { cameraManager?.cameraIdList?.size ?: 0 }.getOrDefault(0)
+    }
+
+    fun hasFrontAndBackCamera(): Pair<Boolean, Boolean> {
+        val cm = cameraManager ?: return false to false
+        return runCatching {
+            var front = false
+            var back = false
+            cm.cameraIdList.forEach { id ->
+                val facing = cm.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING)
+                if (facing == CameraCharacteristics.LENS_FACING_FRONT) front = true
+                if (facing == CameraCharacteristics.LENS_FACING_BACK) back = true
+            }
+            front to back
+        }.getOrDefault(false to false)
+    }
+
+    fun createPhotoOutputOptions(): Pair<ImageCapture.OutputFileOptions, Uri?> {
+        val name = "TEENA_IMG_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "$name.jpg")
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/TeenaAI")
+            }
+            val options = ImageCapture.OutputFileOptions.Builder(
+                context.contentResolver,
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues
+            ).build()
+            return options to null
+        }
+        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), "TeenaAI").apply { mkdirs() }
+        val file = File(dir, "$name.jpg")
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        return ImageCapture.OutputFileOptions.Builder(file).build() to uri
+    }
+
+    fun createVideoOutputTarget(): CameraVideoTarget {
+        val name = "TEENA_VID_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "$name.mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/TeenaAI")
+            }
+            val options = MediaStoreOutputOptions.Builder(
+                context.contentResolver,
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            ).setContentValues(contentValues).build()
+            return CameraVideoTarget.MediaStoreTarget(options)
+        }
+        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "TeenaAI").apply { mkdirs() }
+        val file = File(dir, "$name.mp4")
+        return CameraVideoTarget.FileTarget(FileOutputOptions.Builder(file).build(), file)
+    }
+
+    fun openCapturedMediaUri(uri: Uri, mimeType: String): Result<Unit> = runCatching {
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(viewIntent)
+    }
 
     fun toggleFlashlight(enable: Boolean): Result<Boolean> {
         val cm = cameraManager ?: return Result.failure(IllegalStateException("CameraManager unavailable."))

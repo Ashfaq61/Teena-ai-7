@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -12,6 +14,12 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,19 +35,24 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Navigation
-import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,12 +66,16 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.example.system.CameraVideoTarget
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -469,6 +486,7 @@ private fun PhoneAndMapsTab(viewModel: TeenaViewModel) {
     }
 }
 
+@SuppressLint("MissingPermission")
 @Composable
 private fun CameraAndMediaTab(
     viewModel: TeenaViewModel,
@@ -480,16 +498,37 @@ private fun CameraAndMediaTab(
     val torchOn by viewModel.torchEnabled.collectAsStateWithLifecycle()
 
     var useFrontCamera by remember { mutableStateOf(false) }
+    var cameraBound by remember { mutableStateOf(false) }
     var volumeSlider by remember { mutableFloatStateOf(viewModel.container.cameraMediaEngine.getMediaVolumePercent().toFloat()) }
     var brightnessSlider by remember { mutableFloatStateOf(viewModel.container.cameraMediaEngine.getSystemBrightnessPercent().toFloat()) }
     var cameraFeedback by remember { mutableStateOf("") }
+    var lastPhotoUri by remember { mutableStateOf<Uri?>(null) }
+    var lastVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    var recordingSeconds by remember { mutableLongStateOf(0L) }
 
     val imageCapture = remember { ImageCapture.Builder().build() }
+    val recorder = remember {
+        Recorder.Builder()
+            .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
+            .build()
+    }
+    val videoCapture = remember { VideoCapture.withOutput(recorder) }
     val previewView = remember { PreviewView(context) }
 
     val camPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+        ActivityResultContracts.RequestMultiplePermissions()
     ) { viewModel.refreshSystemHealth() }
+
+    LaunchedEffect(activeRecording != null) {
+        if (activeRecording != null) {
+            recordingSeconds = 0L
+            while (activeRecording != null) {
+                delay(1000L)
+                recordingSeconds++
+            }
+        }
+    }
 
     if (perms.camera) {
         DisposableEffect(useFrontCamera, lifecycleOwner) {
@@ -503,16 +542,23 @@ private fun CameraAndMediaTab(
                     }
                     val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
                     provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+                    provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, videoCapture)
+                    cameraBound = true
                 }.onFailure { e ->
+                    cameraBound = false
                     cameraFeedback = "CameraX error: ${e.localizedMessage}"
                 }
             }, executor)
             onDispose {
+                runCatching { activeRecording?.stop() }
+                activeRecording = null
+                cameraBound = false
                 runCatching { providerFuture.get().unbindAll() }
             }
         }
     }
+
+    val (hasFront, hasBack) = remember { viewModel.container.cameraMediaEngine.hasFrontAndBackCamera() }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -522,13 +568,26 @@ private fun CameraAndMediaTab(
         item {
             NeuralCard {
                 SectionHeader(
-                    title = "CameraX Live Vision",
-                    subtitle = if (useFrontCamera) "Front Camera Active" else "Rear Camera Active",
-                    trailing = { StatusPill(if (perms.camera) "ACTIVE" else "BLOCKED") }
+                    title = "CameraX Photo & Video Capture",
+                    subtitle = "${if (useFrontCamera) "Front" else "Rear"} Camera • Front=$hasFront, Rear=$hasBack",
+                    trailing = {
+                        StatusPill(
+                            when {
+                                !perms.camera -> "BLOCKED"
+                                cameraBound -> "ACTIVE"
+                                else -> "IMPLEMENTED_NOT_DEVICE_VERIFIED"
+                            }
+                        )
+                    }
                 )
                 if (!perms.camera) {
-                    Button(onClick = { camPermLauncher.launch(Manifest.permission.CAMERA) }) {
-                        Text("Grant Camera Permission")
+                    Button(
+                        onClick = {
+                            camPermLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
+                        },
+                        modifier = Modifier.minimumInteractiveComponentSize().testTag("grant_camera_perm_btn")
+                    ) {
+                        Text("Grant Camera & Mic Permission")
                     }
                 } else {
                     Box(
@@ -539,11 +598,122 @@ private fun CameraAndMediaTab(
                     ) {
                         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
                     }
+                    if (activeRecording != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.FiberManualRecord,
+                                contentDescription = "Recording active",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                "Recording video: ${recordingSeconds}s (Audio=${perms.recordAudio})",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
+                            onClick = {
+                                val (outputOpts, fallbackUri) = viewModel.container.cameraMediaEngine.createPhotoOutputOptions()
+                                imageCapture.takePicture(
+                                    outputOpts,
+                                    ContextCompat.getMainExecutor(context),
+                                    object : ImageCapture.OnImageSavedCallback {
+                                        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                            val saved = outputFileResults.savedUri ?: fallbackUri
+                                            lastPhotoUri = saved
+                                            cameraFeedback = "Photo saved: ${saved?.toString() ?: "MediaStore Pictures/TeenaAI"}"
+                                        }
+
+                                        override fun onError(exception: ImageCaptureException) {
+                                            cameraFeedback = "Photo error: ${exception.message}"
+                                        }
+                                    }
+                                )
+                            },
+                            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("camera_take_photo_btn")
+                        ) {
+                            Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.size(4.dp))
+                            Text("Photo")
+                        }
+                        Button(
+                            onClick = {
+                                val currentRec = activeRecording
+                                if (currentRec != null) {
+                                    currentRec.stop()
+                                    activeRecording = null
+                                } else {
+                                    val target = viewModel.container.cameraMediaEngine.createVideoOutputTarget()
+                                    val pending = when (target) {
+                                        is CameraVideoTarget.MediaStoreTarget -> recorder.prepareRecording(context, target.options)
+                                        is CameraVideoTarget.FileTarget -> recorder.prepareRecording(context, target.options)
+                                    }.apply {
+                                        if (perms.recordAudio) withAudioEnabled()
+                                    }
+                                    activeRecording = pending.start(ContextCompat.getMainExecutor(context)) { event ->
+                                        when (event) {
+                                            is VideoRecordEvent.Start -> {
+                                                cameraFeedback = "Video recording started..."
+                                            }
+                                            is VideoRecordEvent.Finalize -> {
+                                                activeRecording = null
+                                                if (event.hasError()) {
+                                                    cameraFeedback = "Video error (${event.error}): ${event.cause?.localizedMessage ?: "Failed"}"
+                                                } else {
+                                                    val uri = event.outputResults.outputUri
+                                                    lastVideoUri = uri
+                                                    cameraFeedback = "Video saved: $uri"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            colors = if (activeRecording != null) {
+                                ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            } else {
+                                ButtonDefaults.buttonColors()
+                            },
+                            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("camera_record_video_btn")
+                        ) {
+                            Icon(
+                                if (activeRecording != null) Icons.Default.Stop else Icons.Default.Videocam,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.size(4.dp))
+                            Text(if (activeRecording != null) "Stop" else "Video")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (activeRecording != null) {
+                                    cameraFeedback = "Stop video recording before switching front/rear camera."
+                                } else {
+                                    useFrontCamera = !useFrontCamera
+                                }
+                            },
+                            modifier = Modifier.minimumInteractiveComponentSize().testTag("camera_flip_btn")
+                        ) {
+                            Icon(Icons.Default.Cameraswitch, contentDescription = "Switch Front/Rear")
+                            Spacer(Modifier.size(4.dp))
+                            Text("Flip")
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
                             onClick = {
                                 imageCapture.takePicture(
                                     ContextCompat.getMainExecutor(context),
@@ -556,27 +726,43 @@ private fun CameraAndMediaTab(
                                                 onNavigateToChat()
                                             }
                                         }
+
                                         override fun onError(exception: ImageCaptureException) {
                                             cameraFeedback = "Capture error: ${exception.message}"
                                         }
                                     }
                                 )
                             },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("camera_analyze_ai_btn")
                         ) {
                             Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.size(4.dp))
-                            Text("Capture & Analyze")
+                            Text("Analyze in AI")
                         }
-                        OutlinedButton(onClick = { useFrontCamera = !useFrontCamera }) {
-                            Icon(Icons.Default.Cameraswitch, contentDescription = "Switch Front/Rear")
-                            Spacer(Modifier.size(4.dp))
-                            Text("Flip")
+                        lastPhotoUri?.let { uri ->
+                            OutlinedButton(
+                                onClick = { viewModel.container.cameraMediaEngine.openCapturedMediaUri(uri, "image/jpeg") },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(4.dp))
+                                Text("Open Photo")
+                            }
+                        }
+                        lastVideoUri?.let { uri ->
+                            OutlinedButton(
+                                onClick = { viewModel.container.cameraMediaEngine.openCapturedMediaUri(uri, "video/mp4") },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(4.dp))
+                                Text("Open Video")
+                            }
                         }
                     }
                 }
                 if (cameraFeedback.isNotBlank()) {
-                    Text(cameraFeedback, style = MaterialTheme.typography.bodySmall)
+                    Text(cameraFeedback, style = MaterialTheme.typography.bodySmall, color = NeuralCyan)
                 }
             }
         }

@@ -2,7 +2,9 @@ package com.example.data.remote
 
 import android.graphics.Bitmap
 import android.util.Base64
+import com.example.core.security.EmergencyStopController
 import com.example.core.security.SecurityAuditor
+import com.example.data.local.GeminiModelDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,6 +14,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -71,15 +74,45 @@ data class GitHubWorkflowRunInfo(
     val createdAt: String
 )
 
-class TeenaNetworkClients {
+data class McpProbeResult(
+    val serverName: String,
+    val tools: List<String>,
+    val latencyMs: Long
+)
+
+data class A2aAgentCard(
+    val name: String,
+    val description: String,
+    val rpcUrl: String,
+    val skills: List<String>,
+    val latencyMs: Long
+)
+
+class GeminiHttpException(
+    val httpCode: Int,
+    val apiStatus: String,
+    override val message: String
+) : IllegalStateException(message)
+
+class TeenaNetworkClients(
+    geminiModelDao: GeminiModelDao? = null,
+    private val geminiBaseUrl: String = "https://generativelanguage.googleapis.com",
+    private val emergencyStopController: EmergencyStopController? = null
+) {
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            if (emergencyStopController?.isStopped() == true) {
+                throw IOException("Emergency Stop active: external network calls halted.")
+            }
+            chain.proceed(chain.request())
+        }
         .build()
 
-    val modelRegistry: ModelRegistry = ModelRegistry(httpClient)
+    val modelRegistry: ModelRegistry = ModelRegistry(httpClient, geminiModelDao, geminiBaseUrl)
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -141,7 +174,8 @@ class TeenaNetworkClients {
         systemInstruction: String,
         userPrompt: String,
         recentHistory: List<Pair<String, String>> = emptyList(),
-        attachedImage: Bitmap? = null
+        attachedImage: Bitmap? = null,
+        maxOutputTokens: Int? = null
     ): Result<OpenAiChatResult> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanKey = apiKey.trim()
@@ -150,8 +184,8 @@ class TeenaNetworkClients {
             if (cleanModel.isEmpty()) throw IllegalStateException("No Gemini chat model selected.")
 
             val start = System.currentTimeMillis()
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent"
-            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage)
+            val url = "${geminiBaseUrl.trimEnd('/')}/v1beta/models/$cleanModel:generateContent"
+            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage, maxOutputTokens)
 
             val request = Request.Builder()
                 .url(url)
@@ -163,8 +197,7 @@ class TeenaNetworkClients {
             httpClient.newCall(request).execute().use { resp ->
                 val bodyStr = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    val errMsg = extractJsonError(bodyStr) ?: "Gemini HTTP ${resp.code}"
-                    throw IllegalStateException(SecurityAuditor.redactSecrets(errMsg))
+                    throw buildGeminiHttpException(resp.code, bodyStr)
                 }
                 val text = extractGeminiCandidateText(JSONObject(bodyStr))
                 if (text.isBlank()) throw IllegalStateException("Gemini REST returned empty content")
@@ -193,8 +226,8 @@ class TeenaNetworkClients {
             if (cleanModel.isEmpty()) throw IllegalStateException("No Gemini chat model selected.")
 
             val start = System.currentTimeMillis()
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:streamGenerateContent?alt=sse"
-            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage)
+            val url = "${geminiBaseUrl.trimEnd('/')}/v1beta/models/$cleanModel:streamGenerateContent?alt=sse"
+            val payload = buildGeminiRestPayload(systemInstruction, recentHistory, userPrompt, attachedImage, null)
 
             val request = Request.Builder()
                 .url(url)
@@ -206,8 +239,7 @@ class TeenaNetworkClients {
             httpClient.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     val errBody = resp.body?.string().orEmpty()
-                    val errMsg = extractJsonError(errBody) ?: "Gemini Stream HTTP ${resp.code}"
-                    throw IllegalStateException(SecurityAuditor.redactSecrets(errMsg))
+                    throw buildGeminiHttpException(resp.code, errBody)
                 }
                 val source = resp.body?.source() ?: throw IllegalStateException("Empty Gemini stream body")
                 val accumulated = StringBuilder()
@@ -238,11 +270,29 @@ class TeenaNetworkClients {
         }
     }
 
+    private fun buildGeminiHttpException(code: Int, body: String): GeminiHttpException {
+        val parsed = runCatching {
+            val root = JSONObject(body)
+            val errObj = root.optJSONObject("error")
+            val status = errObj?.optString("status").orEmpty()
+            val msg = errObj?.optString("message")?.takeIf { it.isNotBlank() }
+                ?: extractJsonError(body)
+                ?: "Gemini HTTP $code"
+            status to msg
+        }.getOrElse { "" to ("Gemini HTTP $code") }
+        return GeminiHttpException(
+            httpCode = code,
+            apiStatus = parsed.first,
+            message = SecurityAuditor.redactSecrets(parsed.second)
+        )
+    }
+
     private fun buildGeminiRestPayload(
         systemInstruction: String,
         recentHistory: List<Pair<String, String>>,
         userPrompt: String,
-        attachedImage: Bitmap?
+        attachedImage: Bitmap?,
+        maxOutputTokens: Int?
     ): JSONObject {
         val contentsArray = JSONArray()
         recentHistory.takeLast(8).forEach { (role, msg) ->
@@ -285,6 +335,9 @@ class TeenaNetworkClients {
                 put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
                 })
+            }
+            if (maxOutputTokens != null && maxOutputTokens > 0) {
+                put("generationConfig", JSONObject().put("maxOutputTokens", maxOutputTokens))
             }
             put("contents", contentsArray)
         }
@@ -699,6 +752,320 @@ class TeenaNetworkClients {
                 "Workflow '$workflowId' dispatched on $owner/$repo ($ref)."
             }
         }
+    }
+
+    suspend fun createGitHubBranch(
+        owner: String,
+        repo: String,
+        baseBranch: String = "main",
+        newBranch: String,
+        githubToken: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanBase = baseBranch.ifBlank { "main" }
+            val refReq = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/git/ref/heads/$cleanBase")
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("Authorization", "Bearer $githubToken")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .get()
+                .build()
+            val baseSha = httpClient.newCall(refReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException(extractJsonError(body) ?: "GitHub ref HTTP ${resp.code}")
+                }
+                JSONObject(body).optJSONObject("object")?.optString("sha").orEmpty()
+            }
+            if (baseSha.isBlank()) throw IllegalStateException("Could not resolve base SHA for $cleanBase.")
+
+            val createPayload = JSONObject().apply {
+                put("ref", "refs/heads/$newBranch")
+                put("sha", baseSha)
+            }
+            val createReq = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/git/refs")
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("Authorization", "Bearer $githubToken")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .post(createPayload.toString().toRequestBody(jsonMediaType))
+                .build()
+            httpClient.newCall(createReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful && resp.code != 422) {
+                    throw IllegalStateException(extractJsonError(body) ?: "Create branch HTTP ${resp.code}")
+                }
+            }
+            newBranch
+        }
+    }
+
+    suspend fun commitFileToGitHubBranch(
+        owner: String,
+        repo: String,
+        branch: String,
+        filePath: String,
+        fileContent: String,
+        commitMessage: String,
+        githubToken: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanPath = filePath.trimStart('/')
+            val encodedB64 = Base64.encodeToString(fileContent.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+            // Check existing file SHA if updating on branch
+            val getReq = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/contents/$cleanPath?ref=$branch")
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("Authorization", "Bearer $githubToken")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .get()
+                .build()
+            val existingSha = runCatching {
+                httpClient.newCall(getReq).execute().use { resp ->
+                    if (resp.isSuccessful) JSONObject(resp.body?.string().orEmpty()).optString("sha") else ""
+                }
+            }.getOrDefault("")
+
+            val payload = JSONObject().apply {
+                put("message", commitMessage)
+                put("content", encodedB64)
+                put("branch", branch)
+                if (existingSha.isNotBlank()) put("sha", existingSha)
+            }
+            val putReq = Request.Builder()
+                .url("https://api.github.com/repos/$owner/$repo/contents/$cleanPath")
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("Authorization", "Bearer $githubToken")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .put(payload.toString().toRequestBody(jsonMediaType))
+                .build()
+            httpClient.newCall(putReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException(extractJsonError(body) ?: "Commit file HTTP ${resp.code}")
+                }
+                JSONObject(body).optJSONObject("commit")?.optString("html_url")
+                    .orEmpty()
+                    .ifBlank { "https://github.com/$owner/$repo/tree/$branch" }
+            }
+        }
+    }
+
+    suspend fun probeMcpServer(
+        endpointUrl: String,
+        authToken: String? = null
+    ): Result<McpProbeResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanUrl = validateHttpsOrLoopbackUrl(endpointUrl)
+            val start = System.currentTimeMillis()
+            val initPayload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", 1)
+                put("method", "initialize")
+                put(
+                    "params",
+                    JSONObject().apply {
+                        put("protocolVersion", "2024-11-05")
+                        put("capabilities", JSONObject())
+                        put(
+                            "clientInfo",
+                            JSONObject().put("name", "TeenaAI").put("version", "1.0.0")
+                        )
+                    }
+                )
+            }
+            val initJson = postJsonRpc(cleanUrl, authToken, initPayload)
+            val serverName = initJson.optJSONObject("result")
+                ?.optJSONObject("serverInfo")
+                ?.optString("name")
+                ?.takeIf { it.isNotBlank() }
+                ?: cleanUrl
+
+            val listPayload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", 2)
+                put("method", "tools/list")
+                put("params", JSONObject())
+            }
+            val listJson = runCatching { postJsonRpc(cleanUrl, authToken, listPayload) }.getOrNull()
+            val toolsArr = listJson?.optJSONObject("result")?.optJSONArray("tools") ?: JSONArray()
+            val toolNames = (0 until toolsArr.length()).mapNotNull { i ->
+                toolsArr.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+            }
+            McpProbeResult(
+                serverName = serverName,
+                tools = toolNames,
+                latencyMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+            )
+        }
+    }
+
+    suspend fun callMcpAdvisor(
+        endpointUrl: String,
+        authToken: String? = null,
+        toolName: String,
+        question: String
+    ): Result<OpenAiChatResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanUrl = validateHttpsOrLoopbackUrl(endpointUrl)
+            val start = System.currentTimeMillis()
+            val payload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", System.currentTimeMillis())
+                put("method", "tools/call")
+                put(
+                    "params",
+                    JSONObject().apply {
+                        put("name", toolName.ifBlank { "advise" })
+                        put("arguments", JSONObject().put("question", question).put("prompt", question))
+                    }
+                )
+            }
+            val respJson = postJsonRpc(cleanUrl, authToken, payload)
+            val resultObj = respJson.optJSONObject("result")
+            val contentArr = resultObj?.optJSONArray("content")
+            val text = buildString {
+                if (contentArr != null) {
+                    for (i in 0 until contentArr.length()) {
+                        val t = contentArr.optJSONObject(i)?.optString("text").orEmpty()
+                        if (t.isNotBlank()) appendLine(t)
+                    }
+                }
+                if (isEmpty() && resultObj != null) {
+                    append(resultObj.optString("text").ifBlank { resultObj.toString() })
+                }
+            }.trim()
+            if (text.isBlank()) throw IllegalStateException("MCP server returned empty response")
+            OpenAiChatResult(
+                text = text,
+                modelUsed = "mcp:${toolName.ifBlank { "tools/call" }}",
+                latencyMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+            )
+        }
+    }
+
+    suspend fun fetchA2aAgentCard(
+        endpointUrl: String,
+        authToken: String? = null
+    ): Result<A2aAgentCard> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanBase = validateHttpsOrLoopbackUrl(endpointUrl).trimEnd('/')
+            val cardUrl = if (cleanBase.endsWith("agent.json")) cleanBase else "$cleanBase/.well-known/agent.json"
+            val start = System.currentTimeMillis()
+            val req = Request.Builder()
+                .url(cardUrl)
+                .addHeader("Accept", "application/json")
+                .apply {
+                    if (!authToken.isNullOrBlank()) addHeader("Authorization", "Bearer $authToken")
+                }
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException(extractJsonError(body) ?: "A2A card HTTP ${resp.code}")
+                }
+                val json = JSONObject(body)
+                val skillsArr = json.optJSONArray("skills") ?: JSONArray()
+                val skills = (0 until skillsArr.length()).mapNotNull { i ->
+                    skillsArr.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+                }
+                A2aAgentCard(
+                    name = json.optString("name", cleanBase),
+                    description = json.optString("description", "A2A Agent"),
+                    rpcUrl = json.optString("url", cleanBase).ifBlank { cleanBase },
+                    skills = skills,
+                    latencyMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                )
+            }
+        }
+    }
+
+    suspend fun sendA2aMessage(
+        rpcUrl: String,
+        authToken: String? = null,
+        messageText: String
+    ): Result<OpenAiChatResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanUrl = validateHttpsOrLoopbackUrl(rpcUrl)
+            val start = System.currentTimeMillis()
+            val msgId = "teena-${System.currentTimeMillis()}"
+            val payload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", msgId)
+                put("method", "message/send")
+                put(
+                    "params",
+                    JSONObject().put(
+                        "message",
+                        JSONObject().apply {
+                            put("role", "user")
+                            put("messageId", msgId)
+                            put("parts", JSONArray().put(JSONObject().put("kind", "text").put("text", messageText)))
+                        }
+                    )
+                )
+            }
+            val respJson = postJsonRpc(cleanUrl, authToken, payload)
+            val resObj = respJson.optJSONObject("result")
+            val text = extractA2aResultText(resObj)
+            if (text.isBlank()) throw IllegalStateException("A2A agent returned empty response")
+            OpenAiChatResult(
+                text = text,
+                modelUsed = "a2a-jsonrpc",
+                latencyMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+            )
+        }
+    }
+
+    private fun extractA2aResultText(resObj: JSONObject?): String {
+        if (resObj == null) return ""
+        val parts = resObj.optJSONArray("parts")
+            ?: resObj.optJSONObject("status")?.optJSONObject("message")?.optJSONArray("parts")
+            ?: resObj.optJSONArray("artifacts")?.optJSONObject(0)?.optJSONArray("parts")
+        if (parts != null) {
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                val t = parts.optJSONObject(i)?.optString("text").orEmpty()
+                if (t.isNotBlank()) sb.appendLine(t)
+            }
+            if (sb.isNotBlank()) return sb.toString().trim()
+        }
+        return resObj.optString("text").ifBlank { resObj.toString() }
+    }
+
+    private fun postJsonRpc(url: String, authToken: String?, payload: JSONObject): JSONObject {
+        val req = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+            .addHeader("Accept", "application/json, text/event-stream")
+            .apply {
+                if (!authToken.isNullOrBlank()) addHeader("Authorization", "Bearer $authToken")
+            }
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException(extractJsonError(body) ?: "JSON-RPC HTTP ${resp.code}")
+            }
+            val json = JSONObject(body)
+            val rpcErr = json.optJSONObject("error")
+            if (rpcErr != null) {
+                throw IllegalStateException(SecurityAuditor.redactSecrets(rpcErr.optString("message", "JSON-RPC error")))
+            }
+            return json
+        }
+    }
+
+    private fun validateHttpsOrLoopbackUrl(raw: String): String {
+        val clean = raw.trim()
+        val isLocalDev = clean.startsWith("http://127.0.0.1") || clean.startsWith("http://localhost")
+        if (!clean.startsWith("https://") && !isLocalDev) {
+            throw SecurityException("Only HTTPS URLs are permitted for external MCP/A2A endpoints.")
+        }
+        return clean
     }
 
     private fun extractJsonError(body: String): String? {

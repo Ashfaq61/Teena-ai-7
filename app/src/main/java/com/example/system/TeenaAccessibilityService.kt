@@ -49,6 +49,9 @@ class TeenaAccessibilityService : AccessibilityService() {
         var instance: TeenaAccessibilityService? = null
             private set
 
+        @Volatile
+        var emergencyHaltActive: Boolean = false
+
         private val _isConnected = MutableStateFlow(false)
         val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
@@ -149,6 +152,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun tapByTextOrDesc(query: String): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "TAP($query)", "Halted by Emergency Stop.")
         val before = captureCurrentScreen()
         val root = rootInActiveWindow ?: return AutomationResult(
             false, false, "TAP($query)", "No active window root available."
@@ -187,6 +191,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun longPressByText(query: String): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "LONG_PRESS($query)", "Halted by Emergency Stop.")
         val before = captureCurrentScreen()
         val root = rootInActiveWindow ?: return AutomationResult(
             false, false, "LONG_PRESS($query)", "No active window root available."
@@ -204,6 +209,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun typeIntoFocusedOrEditable(text: String): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "TYPE_TEXT", "Halted by Emergency Stop.")
         val root = rootInActiveWindow ?: return AutomationResult(
             false, false, "TYPE_TEXT", "No active window root available."
         )
@@ -227,6 +233,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun scrollScreen(forward: Boolean): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "SCROLL", "Halted by Emergency Stop.")
         val before = captureCurrentScreen()
         val root = rootInActiveWindow ?: return AutomationResult(
             false, false, "SCROLL", "No active window root available."
@@ -246,6 +253,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun swipeDirection(direction: String): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "SWIPE_$direction", "Halted by Emergency Stop.")
         val before = captureCurrentScreen()
         val dm = resources.displayMetrics
         val w = dm.widthPixels.toFloat()
@@ -277,6 +285,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun goBackVerified(): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "GLOBAL_BACK", "Halted by Emergency Stop.")
         val before = captureCurrentScreen()
         val ok = performGlobalAction(GLOBAL_ACTION_BACK)
         delay(450)
@@ -286,6 +295,7 @@ class TeenaAccessibilityService : AccessibilityService() {
     }
 
     suspend fun goHomeVerified(): AutomationResult {
+        if (emergencyHaltActive) return AutomationResult(false, false, "GLOBAL_HOME", "Halted by Emergency Stop.")
         val ok = performGlobalAction(GLOBAL_ACTION_HOME)
         delay(450)
         val after = captureCurrentScreen()

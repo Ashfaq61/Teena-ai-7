@@ -3,12 +3,13 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-enum class FeatureStatus {
-    ACTIVE,
-    PARTIAL,
-    BLOCKED,
-    FAILED,
-    NOT_IMPLEMENTED
+enum class FeatureStatus(val displayLabel: String) {
+    ACTIVE("ACTIVE"),
+    IMPLEMENTED_NOT_DEVICE_VERIFIED("IMPLEMENTED NOT DEVICE-VERIFIED"),
+    PARTIAL("PARTIAL"),
+    BLOCKED("BLOCKED"),
+    FAILED("FAILED"),
+    NOT_IMPLEMENTED("NOT_IMPLEMENTED")
 }
 
 enum class ProviderType(val displayName: String) {
@@ -69,6 +70,23 @@ data class ProviderSlotEntity(
     val lastTestedAt: Long = 0
 )
 
+@Entity(tableName = "gemini_model_cache")
+data class GeminiModelCacheEntity(
+    @PrimaryKey val cacheKey: String,
+    val keyFingerprint: String,
+    val modelId: String,
+    val fullName: String,
+    val displayName: String,
+    val supportsGenerateContent: Boolean,
+    val supportsBidiGenerateContent: Boolean,
+    val inputTokenLimit: Int = 0,
+    val outputTokenLimit: Int = 0,
+    val probeStatus: String = "UNPROBED", // UNPROBED, WORKING, BLACKLISTED
+    val probeError: String = "",
+    val lastLatencyMs: Long = Long.MAX_VALUE,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "agent_states")
 data class AgentStateEntity(
     @PrimaryKey val agentId: String,
@@ -78,7 +96,7 @@ data class AgentStateEntity(
     val currentTask: String = "Ready for assignment",
     val tasksCompleted: Int = 0,
     val tasksFailed: Int = 0,
-    val healthStatus: String = "ACTIVE",
+    val healthStatus: String = FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name,
     val healthReason: String = "",
     val lastActiveAt: Long = System.currentTimeMillis()
 )
@@ -94,6 +112,52 @@ data class AgentCollaborationEntity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "external_advisors")
+data class ExternalAdvisorEntity(
+    @PrimaryKey val advisorId: String,
+    val name: String,
+    val sourceType: String, // PROVIDER_MODEL, MCP_SERVER, A2A_AGENT
+    val providerType: String,
+    val slotId: String = "",
+    val modelId: String = "",
+    val endpointUrl: String = "",
+    val status: String = FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name,
+    val lastResponseTimeMs: Long = 0L,
+    val lastStatusMessage: String = "Not probed yet",
+    val capabilities: String = "",
+    val isEnabled: Boolean = true,
+    val lastCheckedAt: Long = 0L
+)
+
+@Entity(tableName = "external_collab_messages")
+data class ExternalCollabMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sessionId: String,
+    val topic: String,
+    val detectedGapReason: String,
+    val questionSent: String,
+    val advisorId: String,
+    val advisorName: String,
+    val advisorModel: String,
+    val protocolUsed: String, // GEMINI_REST, OPENAI_COMPAT, MCP, A2A
+    val rawResponse: String,
+    val comparisonNotes: String = "",
+    val responseTimeMs: Long = 0L,
+    val succeeded: Boolean = false,
+    val errorMessage: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "feature_verifications")
+data class FeatureVerificationEntity(
+    @PrimaryKey val featureId: String,
+    val status: String,
+    val runtimeTestPassed: Boolean,
+    val deviceVerified: Boolean,
+    val lastTestSummary: String,
+    val testedAt: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "marketplace_tools")
 data class MarketplaceToolEntity(
     @PrimaryKey val toolId: String,
@@ -106,11 +170,19 @@ data class MarketplaceToolEntity(
     val executionSpec: String,
     val isBuiltIn: Boolean = false,
     val isInstalled: Boolean = false,
-    val activationStatus: String = "NOT_IMPLEMENTED",
+    val activationStatus: String = FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name,
     val securityScore: Int = 100,
     val securityNotes: String = "",
     val testResult: String = "Not yet tested",
     val previousVersionSpec: String = "",
+    val proposedBy: String = "Teena Core",
+    val scanResult: String = "Pending scan",
+    val toolKind: String = "BUILT_IN", // BUILT_IN, DECLARATIVE_JSON, KOTLIN_GITHUB_BRANCH
+    val pipelineStagesJson: String = "[]",
+    val historyLog: String = "",
+    val deviceVerified: Boolean = false,
+    val branchName: String = "",
+    val releaseUrl: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 )
 

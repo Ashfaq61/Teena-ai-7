@@ -82,6 +82,30 @@ interface ProviderSlotDao {
 }
 
 @Dao
+interface GeminiModelDao {
+    @Query("SELECT * FROM gemini_model_cache ORDER BY updatedAt DESC")
+    fun observeAllCache(): Flow<List<GeminiModelCacheEntity>>
+
+    @Query("SELECT * FROM gemini_model_cache WHERE keyFingerprint = :keyFingerprint")
+    suspend fun getModelsForKeyOnce(keyFingerprint: String): List<GeminiModelCacheEntity>
+
+    @Query("SELECT * FROM gemini_model_cache WHERE cacheKey = :cacheKey LIMIT 1")
+    suspend fun getModelByCacheKey(cacheKey: String): GeminiModelCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertModels(models: List<GeminiModelCacheEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertModel(model: GeminiModelCacheEntity)
+
+    @Query("UPDATE gemini_model_cache SET probeStatus = 'UNPROBED', probeError = '' WHERE keyFingerprint = :keyFingerprint AND probeStatus = 'BLACKLISTED'")
+    suspend fun clearBlacklistForKey(keyFingerprint: String)
+
+    @Query("DELETE FROM gemini_model_cache WHERE keyFingerprint = :keyFingerprint AND modelId NOT IN (:activeModelIds)")
+    suspend fun pruneRemovedModels(keyFingerprint: String, activeModelIds: List<String>)
+}
+
+@Dao
 interface AgentDao {
     @Query("SELECT * FROM agent_states ORDER BY agentId ASC")
     fun observeAgents(): Flow<List<AgentStateEntity>>
@@ -106,12 +130,69 @@ interface AgentDao {
 }
 
 @Dao
+interface ExternalAdvisorDao {
+    @Query("SELECT * FROM external_advisors ORDER BY isEnabled DESC, lastCheckedAt DESC, name ASC")
+    fun observeAdvisors(): Flow<List<ExternalAdvisorEntity>>
+
+    @Query("SELECT * FROM external_advisors ORDER BY isEnabled DESC, name ASC")
+    suspend fun getAdvisorsOnce(): List<ExternalAdvisorEntity>
+
+    @Query("SELECT * FROM external_advisors WHERE advisorId = :advisorId LIMIT 1")
+    suspend fun getAdvisorById(advisorId: String): ExternalAdvisorEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAdvisor(advisor: ExternalAdvisorEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAdvisors(advisors: List<ExternalAdvisorEntity>)
+
+    @Query("DELETE FROM external_advisors WHERE advisorId = :advisorId")
+    suspend fun deleteAdvisor(advisorId: String)
+}
+
+@Dao
+interface ExternalCollabDao {
+    @Query("SELECT * FROM external_collab_messages ORDER BY createdAt DESC LIMIT 150")
+    fun observeMessages(): Flow<List<ExternalCollabMessageEntity>>
+
+    @Query("SELECT * FROM external_collab_messages ORDER BY createdAt DESC LIMIT 150")
+    suspend fun getMessagesOnce(): List<ExternalCollabMessageEntity>
+
+    @Query("SELECT * FROM external_collab_messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
+    suspend fun getSessionMessages(sessionId: String): List<ExternalCollabMessageEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMessage(msg: ExternalCollabMessageEntity): Long
+}
+
+@Dao
+interface FeatureVerificationDao {
+    @Query("SELECT * FROM feature_verifications")
+    fun observeAll(): Flow<List<FeatureVerificationEntity>>
+
+    @Query("SELECT * FROM feature_verifications")
+    suspend fun getAllOnce(): List<FeatureVerificationEntity>
+
+    @Query("SELECT * FROM feature_verifications WHERE featureId = :featureId LIMIT 1")
+    suspend fun getById(featureId: String): FeatureVerificationEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: FeatureVerificationEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entries: List<FeatureVerificationEntity>)
+}
+
+@Dao
 interface MarketplaceToolDao {
-    @Query("SELECT * FROM marketplace_tools ORDER BY isInstalled DESC, name ASC")
+    @Query("SELECT * FROM marketplace_tools ORDER BY isInstalled DESC, updatedAt DESC, name ASC")
     fun observeTools(): Flow<List<MarketplaceToolEntity>>
 
     @Query("SELECT * FROM marketplace_tools")
     suspend fun getToolsOnce(): List<MarketplaceToolEntity>
+
+    @Query("SELECT * FROM marketplace_tools WHERE toolId = :toolId LIMIT 1")
+    suspend fun getToolById(toolId: String): MarketplaceToolEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertTool(tool: MarketplaceToolEntity)

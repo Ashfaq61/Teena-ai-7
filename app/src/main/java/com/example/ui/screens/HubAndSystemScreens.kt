@@ -28,13 +28,17 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +65,9 @@ import com.example.system.TeenaNotificationListenerService
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
 import com.example.ui.viewmodel.TeenaViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private data class HubTile(
     val route: String,
@@ -240,7 +247,12 @@ fun NotificationsAndRemindersScreen(viewModel: TeenaViewModel) {
             }
         }
 
-        item { SectionHeader("Captured Notifications (${notifications.size})") }
+        item {
+            SectionHeader(
+                title = "Captured Notifications (${notifications.size})",
+                subtitle = "Notification text is strictly isolated as passive <untrusted_data> (never executed as commands)"
+            )
+        }
         if (notifications.isNotEmpty()) {
             item {
                 OutlinedTextField(
@@ -349,12 +361,49 @@ fun PermissionsScreen(viewModel: TeenaViewModel) {
 @Composable
 fun SettingsScreen(viewModel: TeenaViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val emergencyStopped by viewModel.isEmergencyStopped.collectAsStateWithLifecycle()
+    val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+
+    val lastRunFormatted = remember(settings.lastSelfImproveRunAt) {
+        if (settings.lastSelfImproveRunAt <= 0L) "Never run yet"
+        else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(settings.lastSelfImproveRunAt))
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Emergency Stop & Prompt-Injection Isolation",
+                    subtitle = "Screen UI, web pages, notifications & advisor replies are wrapped strictly as <untrusted_data> (never commands)",
+                    trailing = { StatusPill(if (emergencyStopped) "EMERGENCY_STOP" else "READY") }
+                )
+                Button(
+                    onClick = {
+                        if (emergencyStopped) viewModel.resumeFromEmergencyStop()
+                        else viewModel.triggerEmergencyStop()
+                    },
+                    colors = if (emergencyStopped) {
+                        ButtonDefaults.buttonColors(containerColor = NeuralMint)
+                    } else {
+                        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    },
+                    modifier = Modifier.fillMaxWidth().minimumInteractiveComponentSize().testTag("settings_emergency_stop_btn")
+                ) {
+                    Icon(
+                        if (emergencyStopped) Icons.Default.PlayArrow else Icons.Default.StopCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.size(6.dp))
+                    Text(if (emergencyStopped) "Resume Operations" else "EMERGENCY STOP (Halt All Automation & Calls)")
+                }
+            }
+        }
+
         item {
             NeuralCard {
                 SectionHeader("AI, Privacy & Background Controls")
@@ -364,6 +413,13 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
                 SettingToggleRow("Automatic Provider Failover", "Switch to next healthy provider if primary fails", settings.autoFailoverProviders) { v ->
                     viewModel.updateSettings { it.copy(autoFailoverProviders = v) }
                 }
+                SettingToggleRow(
+                    "External AI Calls (Advisors / MCP / A2A)",
+                    "Allow asking enabled external AI advisors sanitized technical questions (no keys or personal data)",
+                    settings.externalAiCallsEnabled
+                ) { v ->
+                    viewModel.updateSettings { it.copy(externalAiCallsEnabled = v) }
+                }
                 SettingToggleRow("Confirm Sensitive Actions", "Require authorization before calls, social posts & tool installs", settings.confirmSensitiveActions) { v ->
                     viewModel.updateSettings { it.copy(confirmSensitiveActions = v) }
                 }
@@ -372,6 +428,45 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
                 }
                 SettingToggleRow("Foreground Engine Service", "Run persistent Android foreground service within OS limits", settings.backgroundServiceEnabled) { v ->
                     viewModel.toggleForegroundService(v)
+                }
+            }
+        }
+
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Scheduled Self-Improvement (WorkManager)",
+                    subtitle = "Researches Gemini models, GitHub/HF tools & creates PROPOSED Marketplace items (never auto-installed)",
+                    trailing = { StatusPill(if (settings.autoSelfImproveEnabled) "ACTIVE" else "PARTIAL") }
+                )
+                SettingToggleRow(
+                    "Periodic Research Schedule",
+                    "Runs automatically in background on connected network",
+                    settings.autoSelfImproveEnabled
+                ) { v ->
+                    viewModel.updateSettings { it.copy(autoSelfImproveEnabled = v) }
+                }
+                Text("Research Interval", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(6, 12, 24).forEach { hrs ->
+                        FilterChip(
+                            selected = settings.selfImproveIntervalHours == hrs,
+                            onClick = { viewModel.updateSettings { it.copy(selfImproveIntervalHours = hrs) } },
+                            label = { Text("Every ${hrs}h") }
+                        )
+                    }
+                }
+                Text(
+                    "Last research cycle: $lastRunFormatted",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NeuralCyan
+                )
+                FilledTonalButton(
+                    onClick = { viewModel.runSelfImprovementResearchNow() },
+                    enabled = !isBusy && !emergencyStopped,
+                    modifier = Modifier.fillMaxWidth().minimumInteractiveComponentSize().testTag("settings_run_research_btn")
+                ) {
+                    Text("Run Research Cycle Now")
                 }
             }
         }

@@ -35,6 +35,7 @@ class ExampleRobolectricTest {
     fun mainNavigationAndDashboardRender() {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("TEENA AI").assertIsDisplayed()
+        composeRule.onNodeWithTag("emergency_stop_btn").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_chat").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("chat_input_field").assertIsDisplayed()
@@ -46,7 +47,7 @@ class ExampleRobolectricTest {
 
         composeRule.onNodeWithTag("nav_agents").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("agent_run_mission_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("agent_run_mission_btn").performScrollTo().assertIsDisplayed()
 
         composeRule.onNodeWithTag("nav_hub").performClick()
         composeRule.waitForIdle()
