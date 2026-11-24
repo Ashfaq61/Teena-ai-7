@@ -37,7 +37,10 @@ import com.example.ui.viewmodel.TeenaViewModel
 @Composable
 fun ResearchCenterScreen(viewModel: TeenaViewModel) {
     val ghResults by viewModel.githubResults.collectAsStateWithLifecycle()
+    val repoRiskReports by viewModel.repoRiskReports.collectAsStateWithLifecycle()
     val repoInspect by viewModel.repoInspectionOutput.collectAsStateWithLifecycle()
+    val vaultEntries by viewModel.vaultEntries.collectAsStateWithLifecycle()
+    val vaultInspectState by viewModel.vaultInspectState.collectAsStateWithLifecycle()
     val hfResults by viewModel.hfResults.collectAsStateWithLifecycle()
     val webResults by viewModel.webResults.collectAsStateWithLifecycle()
     val pageSummary by viewModel.webPageSummary.collectAsStateWithLifecycle()
@@ -54,8 +57,21 @@ fun ResearchCenterScreen(viewModel: TeenaViewModel) {
     Column(modifier = Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tabIndex) {
             Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("GitHub") })
-            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("HuggingFace") })
-            Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("Web & History") })
+            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("Vault (${vaultEntries.size})") })
+            Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("HuggingFace") })
+            Tab(selected = tabIndex == 3, onClick = { tabIndex = 3 }, text = { Text("Web") })
+        }
+
+        if (tabIndex == 1) {
+            OriginalCodeVaultTab(
+                entries = vaultEntries,
+                inspectState = vaultInspectState,
+                isBusy = isBusy,
+                onOpenAndVerify = { viewModel.openAndVerifyVaultEntry(it) },
+                onSelectFile = { viewModel.readVaultFileReadOnly(it) },
+                onCloseInspect = { viewModel.closeVaultInspect() }
+            )
+            return@Column
         }
 
         LazyColumn(
@@ -92,32 +108,20 @@ fun ResearchCenterScreen(viewModel: TeenaViewModel) {
                             }
                         }
                     }
-                    items(ghResults) { repo ->
-                        NeuralCard {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(repo.fullName, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                                StatusPill("${repo.securityScore}/100")
-                            }
-                            Text(repo.description, style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                "★ ${repo.stars} • ${repo.language} • License: ${repo.licenseSpdx}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = NeuralCyan
-                            )
-                            Text(repo.securityNotes, style = MaterialTheme.typography.labelSmall, color = NeuralMint)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                FilledTonalButton(onClick = { viewModel.inspectGitHubRepo(repo.fullName) }) {
-                                    Text("Inspect Code & Deps")
-                                }
-                                OutlinedButton(onClick = { viewModel.openExternalUrl(repo.htmlUrl) }) {
-                                    Text("Open")
-                                }
-                            }
-                        }
+                    items(ghResults, key = { it.fullName }) { repo ->
+                        GitHubRepoRiskCard(
+                            repo = repo,
+                            report = repoRiskReports[repo.fullName],
+                            isBusy = isBusy,
+                            onInspectCode = { viewModel.inspectGitHubRepo(repo.fullName) },
+                            onSaveToVault = { viewModel.requestSaveRepoToVault(repo.fullName) },
+                            onProposeTool = { viewModel.proposeToolFromAuditedRepo(repo.fullName) },
+                            onOpenUrl = { viewModel.openExternalUrl(repo.htmlUrl) }
+                        )
                     }
                 }
 
-                1 -> {
+                2 -> {
                     item {
                         NeuralCard {
                             SectionHeader("Hugging Face Model Evaluator")

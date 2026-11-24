@@ -263,3 +263,25 @@ data class AuditLogEntity(
     val details: String,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "code_vault_entries")
+data class CodeVaultEntryEntity(
+    @PrimaryKey val vaultId: String,
+    val repoFullName: String,
+    val repoUrl: String,
+    val commitSha: String,
+    val licenseSpdx: String,
+    val gplWarning: String = "",
+    val attributionText: String = "",
+    val zipFilePath: String,
+    val metadataFilePath: String,
+    val licenseFilePath: String,
+    val zipSha256: String,
+    val zipSizeBytes: Long,
+    val riskLevel: String,
+    val riskScore: Int,
+    val verificationStatus: String = "VERIFIED", // VERIFIED, FAILED
+    val verificationMessage: String = "Verified on save",
+    val downloadedAtIso: String,
+    val downloadedAtMillis: Long = System.currentTimeMillis()
+)

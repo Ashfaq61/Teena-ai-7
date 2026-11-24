@@ -9,6 +9,7 @@ import com.example.ai.SafeToolInterpreter
 import com.example.ai.ToolCreationPipelineEngine
 import com.example.core.security.EmergencyStopController
 import com.example.core.security.KeystoreSecretVault
+import com.example.core.security.OriginalCodeVaultManager
 import com.example.data.local.TeenaDatabase
 import com.example.data.local.TeenaPreferences
 import com.example.data.remote.TeenaNetworkClients
@@ -41,6 +42,7 @@ class TeenaServiceContainer(context: Context) {
     val socialEngine: SocialAutomationEngine by lazy { SocialAutomationEngine(appContext) }
     val documentEngine: DocumentKnowledgeEngine by lazy { DocumentKnowledgeEngine(appContext) }
     val apkBuildEngine: ApkBuildEngine by lazy { ApkBuildEngine(appContext) }
+    val originalCodeVaultManager: OriginalCodeVaultManager by lazy { OriginalCodeVaultManager(appContext) }
 
     val aiBrain: AiBrainEngine by lazy {
         AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController)

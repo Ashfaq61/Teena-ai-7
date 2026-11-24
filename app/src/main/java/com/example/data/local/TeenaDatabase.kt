@@ -25,9 +25,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         NotificationRecordEntity::class,
         ReminderEntity::class,
         BuildRecordEntity::class,
-        AuditLogEntity::class
+        AuditLogEntity::class,
+        CodeVaultEntryEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class TeenaDatabase : RoomDatabase() {
@@ -42,6 +43,7 @@ abstract class TeenaDatabase : RoomDatabase() {
     abstract fun marketplaceToolDao(): MarketplaceToolDao
     abstract fun researchDao(): ResearchDao
     abstract fun systemRecordsDao(): SystemRecordsDao
+    abstract fun codeVaultDao(): CodeVaultDao
 
     companion object {
         @Volatile
@@ -139,6 +141,36 @@ abstract class TeenaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `code_vault_entries` (
+                        `vaultId` TEXT NOT NULL,
+                        `repoFullName` TEXT NOT NULL,
+                        `repoUrl` TEXT NOT NULL,
+                        `commitSha` TEXT NOT NULL,
+                        `licenseSpdx` TEXT NOT NULL,
+                        `gplWarning` TEXT NOT NULL,
+                        `attributionText` TEXT NOT NULL,
+                        `zipFilePath` TEXT NOT NULL,
+                        `metadataFilePath` TEXT NOT NULL,
+                        `licenseFilePath` TEXT NOT NULL,
+                        `zipSha256` TEXT NOT NULL,
+                        `zipSizeBytes` INTEGER NOT NULL,
+                        `riskLevel` TEXT NOT NULL,
+                        `riskScore` INTEGER NOT NULL,
+                        `verificationStatus` TEXT NOT NULL,
+                        `verificationMessage` TEXT NOT NULL,
+                        `downloadedAtIso` TEXT NOT NULL,
+                        `downloadedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`vaultId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): TeenaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -146,7 +178,7 @@ abstract class TeenaDatabase : RoomDatabase() {
                     TeenaDatabase::class.java,
                     "teena_ai_core.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

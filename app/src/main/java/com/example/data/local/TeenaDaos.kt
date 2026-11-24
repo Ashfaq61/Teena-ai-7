@@ -257,3 +257,24 @@ interface SystemRecordsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLog(log: AuditLogEntity): Long
 }
+
+@Dao
+interface CodeVaultDao {
+    @Query("SELECT * FROM code_vault_entries ORDER BY downloadedAtMillis DESC")
+    fun observeVaultEntries(): Flow<List<CodeVaultEntryEntity>>
+
+    @Query("SELECT * FROM code_vault_entries ORDER BY downloadedAtMillis DESC")
+    suspend fun getVaultEntriesOnce(): List<CodeVaultEntryEntity>
+
+    @Query("SELECT * FROM code_vault_entries WHERE vaultId = :vaultId LIMIT 1")
+    suspend fun getById(vaultId: String): CodeVaultEntryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertVaultEntry(entry: CodeVaultEntryEntity)
+
+    @Query("UPDATE code_vault_entries SET verificationStatus = :status, verificationMessage = :message WHERE vaultId = :vaultId")
+    suspend fun updateVerificationStatus(vaultId: String, status: String, message: String)
+
+    @Query("DELETE FROM code_vault_entries WHERE vaultId = :vaultId")
+    suspend fun deleteVaultEntry(vaultId: String)
+}

@@ -715,4 +715,102 @@ class TeenaCoreUnitTest {
         assertEquals(FeatureStatus.ACTIVE, matrixAfter.first { it.id == "self_coding" }.status)
         assertEquals(FeatureStatus.ACTIVE, matrixAfter.first { it.id == "offline_ai" }.status)
     }
+
+    @Test
+    fun originalCodeVaultSavesImmutableZipAndBlocksTamperedArchive() = runTest {
+        val vaultMgr = com.example.core.security.OriginalCodeVaultManager(context)
+
+        // Create a genuine in-memory ZIP archive with original unmodified Kotlin source
+        val baos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(baos).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("repo-main/src/Sample.kt"))
+            zos.write("fun helloVault(): String = \"Original\"".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+            zos.putNextEntry(java.util.zip.ZipEntry("repo-main/LICENSE"))
+            zos.write("MIT License Copyright Test".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+        val zipBytes = baos.toByteArray()
+
+        // 1. Khatarnaak repo MUST be rejected from Vault
+        val dangerousReport = com.example.core.security.RepoRiskAnalyzer.analyzeRealCode(
+            repoFullName = "bad/actor",
+            repoUrl = "https://github.com/bad/actor",
+            commitSha = "1111222233334444",
+            licenseSpdx = "MIT",
+            licenseText = "MIT",
+            stars = 100,
+            ownerLogin = "bad",
+            ownerAccountAgeDays = 500L,
+            files = listOf(com.example.core.security.AuditedRepoFile("Run.kt", "Runtime.getRuntime().exec(\"id\")"))
+        )
+        assertTrue(vaultMgr.saveImmutableSnapshot(dangerousReport, zipBytes).isFailure)
+
+        // 2. Clean repo saves unmodified ZIP + metadata.json + LICENSE.txt and passes SHA-256 open
+        val cleanReport = com.example.core.security.RepoRiskAnalyzer.analyzeRealCode(
+            repoFullName = "good/sample-lib",
+            repoUrl = "https://github.com/good/sample-lib",
+            commitSha = "abcdef1234567890abcdef1234567890abcdef12",
+            licenseSpdx = "MIT",
+            licenseText = "MIT License Copyright Test",
+            stars = 420,
+            ownerLogin = "good",
+            ownerAccountAgeDays = 900L,
+            files = listOf(com.example.core.security.AuditedRepoFile("src/Sample.kt", "fun helloVault(): String = \"Original\""))
+        )
+        val saved = vaultMgr.saveImmutableSnapshot(cleanReport, zipBytes).getOrThrow()
+        assertEquals(com.example.core.security.OriginalCodeVaultManager.sha256Hex(zipBytes), saved.zipSha256)
+        assertTrue(java.io.File(saved.metadataFilePath).readText().contains(cleanReport.commitSha))
+        assertTrue(java.io.File(saved.licenseFilePath).readText().contains("MIT License"))
+
+        db.codeVaultDao().upsertVaultEntry(
+            com.example.data.local.CodeVaultEntryEntity(
+                vaultId = saved.vaultId,
+                repoFullName = saved.repoFullName,
+                repoUrl = saved.repoUrl,
+                commitSha = saved.commitSha,
+                licenseSpdx = saved.licenseSpdx,
+                attributionText = saved.attributionText,
+                zipFilePath = saved.zipFilePath,
+                metadataFilePath = saved.metadataFilePath,
+                licenseFilePath = saved.licenseFilePath,
+                zipSha256 = saved.zipSha256,
+                zipSizeBytes = saved.zipSizeBytes,
+                riskLevel = cleanReport.riskLevel.name,
+                riskScore = cleanReport.riskScore,
+                downloadedAtIso = saved.downloadedAtIso,
+                downloadedAtMillis = saved.downloadedAtMillis
+            )
+        )
+
+        val openOk = vaultMgr.openAndVerifyArchive(saved.zipFilePath, saved.metadataFilePath, saved.zipSha256)
+        assertTrue(openOk.verified)
+        assertEquals("VERIFIED", openOk.status)
+        assertTrue(openOk.entryPaths.contains("repo-main/src/Sample.kt"))
+
+        val readText = vaultMgr.readEntryTextReadOnly(
+            saved.zipFilePath,
+            saved.metadataFilePath,
+            saved.zipSha256,
+            "repo-main/src/Sample.kt"
+        ).getOrThrow()
+        assertTrue(readText.contains("helloVault"))
+
+        // 3. Tamper 1 byte in stored ZIP -> SHA-256 verification returns FAILED and blocks viewer
+        val zipFile = java.io.File(saved.zipFilePath)
+        zipFile.setWritable(true)
+        val tampered = zipBytes.copyOf()
+        tampered[tampered.lastIndex] = (tampered[tampered.lastIndex].toInt() xor 0xFF).toByte()
+        zipFile.writeBytes(tampered)
+
+        val openTampered = vaultMgr.openAndVerifyArchive(saved.zipFilePath, saved.metadataFilePath, saved.zipSha256)
+        assertFalse(openTampered.verified)
+        assertEquals("FAILED", openTampered.status)
+        assertTrue(vaultMgr.readEntryTextReadOnly(
+            saved.zipFilePath,
+            saved.metadataFilePath,
+            saved.zipSha256,
+            "repo-main/src/Sample.kt"
+        ).isFailure)
+    }
 }

@@ -15,10 +15,14 @@ import com.example.ai.LiveTranscriptLine
 import com.example.ai.LiveVoiceState
 import com.example.ai.LocalHardwareProfile
 import com.example.core.TeenaServiceContainer
+import com.example.core.security.RepoRiskAnalyzer
+import com.example.core.security.RepoRiskLevel
+import com.example.core.security.RepoRiskReport
 import com.example.core.security.SecurityAuditor
 import com.example.core.security.UntrustedContentSanitizer
 import com.example.data.local.AuditLogEntity
 import com.example.data.local.BuildRecordEntity
+import com.example.data.local.CodeVaultEntryEntity
 import com.example.data.local.ConversationEntity
 import com.example.data.local.FeatureStatus
 import com.example.data.local.MarketplaceToolEntity
@@ -65,6 +69,15 @@ data class PendingUserConfirmation(
     val title: String,
     val description: String,
     val onConfirm: () -> Unit
+)
+
+data class VaultInspectUiState(
+    val entry: CodeVaultEntryEntity,
+    val verified: Boolean,
+    val statusMessage: String,
+    val files: List<String> = emptyList(),
+    val selectedFilePath: String = "",
+    val selectedFileContent: String = ""
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -135,6 +148,9 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val auditLogs = db.systemRecordsDao().observeAuditLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val vaultEntries = db.codeVaultDao().observeVaultEntries()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Live OS telemetry
@@ -214,8 +230,14 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private val _githubResults = MutableStateFlow<List<GitHubRepoDetail>>(emptyList())
     val githubResults: StateFlow<List<GitHubRepoDetail>> = _githubResults.asStateFlow()
 
+    private val _repoRiskReports = MutableStateFlow<Map<String, RepoRiskReport>>(emptyMap())
+    val repoRiskReports: StateFlow<Map<String, RepoRiskReport>> = _repoRiskReports.asStateFlow()
+
     private val _repoInspectionOutput = MutableStateFlow("")
     val repoInspectionOutput: StateFlow<String> = _repoInspectionOutput.asStateFlow()
+
+    private val _vaultInspectState = MutableStateFlow<VaultInspectUiState?>(null)
+    val vaultInspectState: StateFlow<VaultInspectUiState?> = _vaultInspectState.asStateFlow()
 
     private val _hfResults = MutableStateFlow<List<HuggingFaceModelDetail>>(emptyList())
     val hfResults: StateFlow<List<HuggingFaceModelDetail>> = _hfResults.asStateFlow()
@@ -993,7 +1015,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- GitHub, HuggingFace, Web Research ---
+    // --- GitHub, HuggingFace, Web Research & Original Code Vault ---
     fun searchGitHub(query: String) {
         if (query.isBlank()) return
         viewModelScope.launch {
@@ -1002,6 +1024,16 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             container.networkClients.searchGitHubRepositories(query, token)
                 .onSuccess { list ->
                     _githubResults.value = list
+                    val placeholders = list.associate { repo ->
+                        repo.fullName to RepoRiskAnalyzer.createUnreviewedPlaceholder(
+                            repoFullName = repo.fullName,
+                            repoUrl = repo.htmlUrl,
+                            licenseSpdx = repo.licenseSpdx,
+                            stars = repo.stars,
+                            ownerLogin = repo.ownerLogin
+                        )
+                    }
+                    _repoRiskReports.value = _repoRiskReports.value + placeholders
                     list.firstOrNull()?.let { top ->
                         db.researchDao().insertResearch(
                             ResearchEntryEntity(
@@ -1010,11 +1042,12 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                                 summary = top.description,
                                 sourceUrl = top.htmlUrl,
                                 licenseInfo = top.licenseSpdx,
-                                securityScore = top.securityScore
+                                compatibilityNotes = "Review: NOT DONE",
+                                securityScore = 0
                             )
                         )
                     }
-                    _statusBanner.value = "Found ${list.size} GitHub repositories."
+                    _statusBanner.value = "Found ${list.size} repos. Har repo par 'Inspect Real Code' zaroori hai (abhi NOT DONE)."
                 }
                 .onFailure { _statusBanner.value = "GitHub search failed: ${it.localizedMessage}" }
             _isBusy.value = false
@@ -1025,11 +1058,237 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isBusy.value = true
             val token = container.vault.readSecret("slot_github_token")
-            container.networkClients.inspectGitHubRepoDependencies(fullName, token)
-                .onSuccess { _repoInspectionOutput.value = it }
-                .onFailure { _repoInspectionOutput.value = "Inspection failed: ${it.localizedMessage}" }
+            container.networkClients.fetchGitHubRepoAuditBundle(fullName, token)
+                .onSuccess { bundle ->
+                    val report = RepoRiskAnalyzer.analyzeRealCode(
+                        repoFullName = bundle.fullName,
+                        repoUrl = bundle.htmlUrl,
+                        commitSha = bundle.commitSha,
+                        licenseSpdx = bundle.licenseSpdx,
+                        licenseText = bundle.licenseText,
+                        stars = bundle.stars,
+                        ownerLogin = bundle.ownerLogin,
+                        ownerAccountAgeDays = bundle.ownerAccountAgeDays,
+                        files = bundle.files
+                    )
+                    _repoRiskReports.value = _repoRiskReports.value + (fullName to report)
+                    _repoInspectionOutput.value = buildString {
+                        appendLine("${report.repoFullName} • Review: ${report.reviewStatusLabel}")
+                        appendLine("Risk Level: ${report.riskLevel.label} (${report.riskScore}/100) • Commit: ${report.commitSha.take(12)}")
+                        appendLine(report.headlineBanner)
+                        if (report.gplWarningRomanUrdu.isNotBlank()) appendLine(report.gplWarningRomanUrdu)
+                        report.findings.forEach { f ->
+                            appendLine("• [${f.severity.label}] ${f.titleRomanUrdu}: ${f.detailRomanUrdu}")
+                        }
+                    }
+                    db.researchDao().insertResearch(
+                        ResearchEntryEntity(
+                            sourceType = "GITHUB_AUDIT",
+                            title = bundle.fullName,
+                            summary = report.headlineBanner,
+                            sourceUrl = bundle.htmlUrl,
+                            licenseInfo = bundle.licenseSpdx,
+                            compatibilityNotes = "${report.reviewStatusLabel} • Commit ${bundle.commitSha.take(10)}",
+                            securityScore = report.riskScore
+                        )
+                    )
+                    _statusBanner.value = "${report.repoFullName}: ${report.riskLevel.label} (${report.filesReviewedCount} files reviewed)"
+                }
+                .onFailure { err ->
+                    _repoInspectionOutput.value = "Review NOT DONE: ${err.localizedMessage}"
+                    _statusBanner.value = "Code review failed (NOT DONE): ${err.localizedMessage}"
+                }
             _isBusy.value = false
         }
+    }
+
+    fun requestSaveRepoToVault(repoFullName: String) {
+        val report = _repoRiskReports.value[repoFullName]
+        if (report == null || !report.codeReviewed) {
+            _statusBanner.value = "NOT DONE: Pehle 'Inspect Real Code' chalayein — bina review ke Vault save band hai."
+            return
+        }
+        if (report.riskLevel == RepoRiskLevel.KHATARNAAK) {
+            _statusBanner.value = "BLOCKED — ${report.headlineBanner}"
+            return
+        }
+        if (!report.licenseAllowsUse) {
+            _statusBanner.value = "BLOCKED: License maujood nahi (${report.licenseSpdx}); bina license Vault save nahi ho sakta."
+            return
+        }
+
+        val gplNote = if (report.gplWarningRomanUrdu.isNotBlank()) "\n\n⚠️ ${report.gplWarningRomanUrdu}" else ""
+        val warningNote = if (report.riskLevel == RepoRiskLevel.EHTIYAT) {
+            "\n\nEhtiyat Wajah: ${report.findings.joinToString("; ") { it.titleRomanUrdu }}"
+        } else ""
+
+        _pendingConfirmation.value = PendingUserConfirmation(
+            title = "Confirm Original Code Vault Save",
+            description = "Repo: ${report.repoFullName}\nCommit SHA: ${report.commitSha.take(16)}\nLicense: ${report.licenseSpdx}\nRisk: ${report.riskLevel.label} (${report.riskScore}/100)$warningNote$gplNote\n\nOriginal ZIP bina ek line badle private read-only vault mein save hoga (execution hamesha band rahegi).",
+            onConfirm = {
+                dismissConfirmation()
+                viewModelScope.launch {
+                    _isBusy.value = true
+                    runCatching {
+                        val token = container.vault.readSecret("slot_github_token")
+                        val zipBytes = container.networkClients.downloadGitHubCommitZip(
+                            fullName = report.repoFullName,
+                            commitSha = report.commitSha,
+                            githubToken = token
+                        ).getOrThrow()
+                        val saved = container.originalCodeVaultManager.saveImmutableSnapshot(report, zipBytes).getOrThrow()
+                        db.codeVaultDao().upsertVaultEntry(
+                            CodeVaultEntryEntity(
+                                vaultId = saved.vaultId,
+                                repoFullName = saved.repoFullName,
+                                repoUrl = saved.repoUrl,
+                                commitSha = saved.commitSha,
+                                licenseSpdx = saved.licenseSpdx,
+                                gplWarning = report.gplWarningRomanUrdu,
+                                attributionText = saved.attributionText,
+                                zipFilePath = saved.zipFilePath,
+                                metadataFilePath = saved.metadataFilePath,
+                                licenseFilePath = saved.licenseFilePath,
+                                zipSha256 = saved.zipSha256,
+                                zipSizeBytes = saved.zipSizeBytes,
+                                riskLevel = report.riskLevel.name,
+                                riskScore = report.riskScore,
+                                verificationStatus = "VERIFIED",
+                                verificationMessage = "Saved immutable ZIP (${saved.zipSha256.take(16)}...)",
+                                downloadedAtIso = saved.downloadedAtIso,
+                                downloadedAtMillis = saved.downloadedAtMillis
+                            )
+                        )
+                        db.systemRecordsDao().insertAuditLog(
+                            AuditLogEntity(
+                                category = "CODE_VAULT",
+                                action = "Saved ${saved.repoFullName} @ ${saved.commitSha.take(10)}",
+                                outcome = "VERIFIED",
+                                details = "SHA256=${saved.zipSha256}, License=${saved.licenseSpdx}"
+                            )
+                        )
+                        saved
+                    }.onSuccess { saved ->
+                        _statusBanner.value = "Original Code Vault mein save ho gaya: ${saved.repoFullName} (SHA-256 verified)"
+                    }.onFailure { err ->
+                        _statusBanner.value = "Vault save failed/blocked: ${err.localizedMessage}"
+                    }
+                    _isBusy.value = false
+                }
+            }
+        )
+    }
+
+    fun proposeToolFromAuditedRepo(repoFullName: String) {
+        val report = _repoRiskReports.value[repoFullName]
+        if (report == null || !report.codeReviewed) {
+            _statusBanner.value = "NOT DONE: Pehle asli code inspect karein — bina review Propose band hai."
+            return
+        }
+        if (report.riskLevel == RepoRiskLevel.KHATARNAAK || !report.proposeAllowed) {
+            _statusBanner.value = "PROPOSE BAND HAI — ${report.headlineBanner}"
+            return
+        }
+        viewModelScope.launch {
+            val slug = repoFullName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(24)
+            val toolId = "tool_ref_${slug}_${report.commitSha.take(6)}"
+            val cleanName = repoFullName.substringAfter("/").take(30).ifBlank { "KotlinRefTool" }
+            val attributionNote = buildString {
+                append("Reference: ${report.repoFullName} (${report.repoUrl}) @ ${report.commitSha.take(12)} | License: ${report.licenseSpdx}.")
+                if (report.gplWarningRomanUrdu.isNotBlank()) append(" ${report.gplWarningRomanUrdu}")
+                append(" Original Vault untouched; Teena generates fresh Kotlin on her own branch.")
+            }
+            db.marketplaceToolDao().upsertTool(
+                MarketplaceToolEntity(
+                    toolId = toolId,
+                    name = cleanName,
+                    description = attributionNote,
+                    version = "1.0.0",
+                    category = "Reference Kotlin",
+                    sourceRepo = report.repoUrl,
+                    licenseSpdx = report.licenseSpdx,
+                    executionSpec = "",
+                    isInstalled = false,
+                    activationStatus = "PROPOSED",
+                    securityScore = report.riskScore,
+                    securityNotes = report.headlineBanner,
+                    testResult = "Proposed (Teena will write new Kotlin on separate branch)",
+                    proposedBy = "Code Vault Ref (${report.licenseSpdx})",
+                    scanResult = "${report.riskLevel.label} (${report.riskScore}/100)",
+                    toolKind = "KOTLIN_GITHUB_BRANCH",
+                    pipelineStagesJson = com.example.ai.ToolCreationPipelineEngine.defaultStagesJson()
+                )
+            )
+            _statusBanner.value = "Proposed '$cleanName' (Separate Kotlin branch mode; Original Vault untouched)."
+        }
+    }
+
+    fun openAndVerifyVaultEntry(vaultId: String) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            val entry = db.codeVaultDao().getById(vaultId)
+            if (entry == null) {
+                _statusBanner.value = "Vault entry nahi mili."
+                _isBusy.value = false
+                return@launch
+            }
+            val result = container.originalCodeVaultManager.openAndVerifyArchive(
+                zipFilePath = entry.zipFilePath,
+                metadataFilePath = entry.metadataFilePath,
+                expectedSha256FromDb = entry.zipSha256
+            )
+            db.codeVaultDao().updateVerificationStatus(entry.vaultId, result.status, result.message)
+            db.systemRecordsDao().insertAuditLog(
+                AuditLogEntity(
+                    category = "CODE_VAULT",
+                    action = "Open & Verify ${entry.repoFullName}",
+                    outcome = result.status,
+                    details = result.message.take(220)
+                )
+            )
+            val refreshed = db.codeVaultDao().getById(entry.vaultId) ?: entry
+            _vaultInspectState.value = VaultInspectUiState(
+                entry = refreshed,
+                verified = result.verified,
+                statusMessage = result.message,
+                files = if (result.verified) result.entryPaths else emptyList()
+            )
+            _statusBanner.value = result.message
+            _isBusy.value = false
+        }
+    }
+
+    fun readVaultFileReadOnly(entryPath: String) {
+        val current = _vaultInspectState.value ?: return
+        viewModelScope.launch {
+            container.originalCodeVaultManager.readEntryTextReadOnly(
+                zipFilePath = current.entry.zipFilePath,
+                metadataFilePath = current.entry.metadataFilePath,
+                expectedSha256FromDb = current.entry.zipSha256,
+                targetEntryPath = entryPath
+            ).onSuccess { text ->
+                _vaultInspectState.value = current.copy(
+                    verified = true,
+                    selectedFilePath = entryPath,
+                    selectedFileContent = text
+                )
+            }.onFailure { err ->
+                val msg = err.localizedMessage ?: "FAILED: Integrity verification error"
+                db.codeVaultDao().updateVerificationStatus(current.entry.vaultId, "FAILED", msg)
+                _vaultInspectState.value = current.copy(
+                    verified = false,
+                    statusMessage = msg,
+                    files = emptyList(),
+                    selectedFilePath = "",
+                    selectedFileContent = ""
+                )
+                _statusBanner.value = msg
+            }
+        }
+    }
+
+    fun closeVaultInspect() {
+        _vaultInspectState.value = null
     }
 
     fun searchHuggingFace(query: String, taskFilter: String) {

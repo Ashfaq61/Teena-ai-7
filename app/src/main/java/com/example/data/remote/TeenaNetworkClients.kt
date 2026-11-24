@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.graphics.Bitmap
 import android.util.Base64
+import com.example.core.security.AuditedRepoFile
 import com.example.core.security.EmergencyStopController
 import com.example.core.security.SecurityAuditor
 import com.example.data.local.GeminiModelDao
@@ -42,9 +43,22 @@ data class GitHubRepoDetail(
     val htmlUrl: String,
     val defaultBranch: String,
     val updatedAt: String,
+    val ownerLogin: String = "",
     val dependenciesPreview: String = "",
-    val securityScore: Int = 100,
-    val securityNotes: String = ""
+    val securityScore: Int = 0,
+    val securityNotes: String = "NOT DONE — Inspect Real Code to run audit"
+)
+
+data class GitHubRepoAuditBundle(
+    val fullName: String,
+    val htmlUrl: String,
+    val commitSha: String,
+    val licenseSpdx: String,
+    val licenseText: String,
+    val stars: Int,
+    val ownerLogin: String,
+    val ownerAccountAgeDays: Long?,
+    val files: List<AuditedRepoFile>
 )
 
 data class HuggingFaceModelDetail(
@@ -465,12 +479,8 @@ class TeenaNetworkClients(
                     val fullName = repo.optString("full_name")
                     val licenseSpdx = repo.optJSONObject("license")?.optString("spdx_id", "NONE") ?: "NONE"
                     val desc = repo.optString("description", "No description")
-                    val scan = SecurityAuditor.auditToolOrCode(
-                        name = fullName,
-                        sourceCodeOrSpec = desc,
-                        licenseSpdx = licenseSpdx,
-                        targetUrl = repo.optString("html_url")
-                    )
+                    val ownerLogin = repo.optJSONObject("owner")?.optString("login")
+                        ?: fullName.substringBefore("/", "")
                     GitHubRepoDetail(
                         fullName = fullName,
                         description = desc,
@@ -480,8 +490,9 @@ class TeenaNetworkClients(
                         htmlUrl = repo.optString("html_url"),
                         defaultBranch = repo.optString("default_branch", "main"),
                         updatedAt = repo.optString("updated_at", ""),
-                        securityScore = scan.score,
-                        securityNotes = scan.findings.joinToString("; ")
+                        ownerLogin = ownerLogin,
+                        securityScore = 0,
+                        securityNotes = "NOT DONE — Asli code abhi inspect nahi hua"
                     )
                 }
             }
@@ -532,6 +543,178 @@ class TeenaNetworkClients(
             }
             if (findings.isEmpty()) "No standard manifest (Gradle/TOML/package.json/README) found in root."
             else findings.toString()
+        }
+    }
+
+    suspend fun fetchGitHubRepoAuditBundle(
+        fullName: String,
+        githubToken: String? = null
+    ): Result<GitHubRepoAuditBundle> = withContext(Dispatchers.IO) {
+        runCatching {
+            fun ghGet(url: String): Request.Builder = Request.Builder()
+                .url(url)
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .apply {
+                    if (!githubToken.isNullOrBlank()) {
+                        addHeader("Authorization", "Bearer $githubToken")
+                    }
+                }
+                .get()
+
+            // 1. Repository metadata
+            val repoJson = httpClient.newCall(ghGet("https://api.github.com/repos/$fullName").build()).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException(extractJsonError(body) ?: "GitHub repo HTTP ${resp.code}")
+                JSONObject(body)
+            }
+            val htmlUrl = repoJson.optString("html_url", "https://github.com/$fullName")
+            val defaultBranch = repoJson.optString("default_branch", "main").ifBlank { "main" }
+            val stars = repoJson.optInt("stargazers_count", 0)
+            val licenseSpdx = repoJson.optJSONObject("license")?.optString("spdx_id", "NONE").orEmpty().ifBlank { "NONE" }
+            val ownerLogin = repoJson.optJSONObject("owner")?.optString("login") ?: fullName.substringBefore("/", "")
+
+            // 2. Owner account age check
+            val ownerAgeDays: Long? = runCatching {
+                if (ownerLogin.isBlank()) null
+                else httpClient.newCall(ghGet("https://api.github.com/users/$ownerLogin").build()).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val createdIso = JSONObject(resp.body?.string().orEmpty()).optString("created_at")
+                    if (createdIso.isBlank()) return@use null
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    }
+                    val createdMs = fmt.parse(createdIso)?.time ?: return@use null
+                    ((System.currentTimeMillis() - createdMs) / 86_400_000L).coerceAtLeast(0L)
+                }
+            }.getOrNull()
+
+            // 3. Exact commit SHA on default branch
+            val commitSha = httpClient.newCall(ghGet("https://api.github.com/repos/$fullName/commits/$defaultBranch").build()).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException(extractJsonError(body) ?: "Commit SHA HTTP ${resp.code}")
+                JSONObject(body).optString("sha")
+            }.also { sha ->
+                if (sha.isBlank()) throw IllegalStateException("Could not resolve commit SHA for $fullName")
+            }
+
+            // 4. Recursive tree at that exact commit SHA
+            val treePaths = runCatching {
+                httpClient.newCall(ghGet("https://api.github.com/repos/$fullName/git/trees/$commitSha?recursive=1").build()).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use emptyList<String>()
+                    val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("tree") ?: JSONArray()
+                    (0 until arr.length()).mapNotNull { i ->
+                        val node = arr.optJSONObject(i) ?: return@mapNotNull null
+                        if (node.optString("type") != "blob") return@mapNotNull null
+                        val size = node.optInt("size", 0)
+                        if (size <= 0 || size > 180_000) return@mapNotNull null
+                        node.optString("path").takeIf { it.isNotBlank() }
+                    }
+                }
+            }.getOrDefault(emptyList())
+
+            fun filePriority(path: String): Int {
+                val lower = path.lowercase()
+                return when {
+                    lower.startsWith("license") || lower.endsWith("/license") || lower.endsWith("license.txt") || lower.endsWith("license.md") -> 0
+                    lower.endsWith("androidmanifest.xml") -> 1
+                    lower.endsWith(".sh") || lower.endsWith(".ps1") || lower.endsWith(".bat") -> 2
+                    lower.endsWith("build.gradle.kts") || lower.endsWith("build.gradle") || lower.endsWith("libs.versions.toml") -> 3
+                    lower.endsWith("package.json") || lower.endsWith("requirements.txt") -> 4
+                    lower.endsWith(".kt") || lower.endsWith(".java") || lower.endsWith(".py") || lower.endsWith(".js") || lower.endsWith(".ts") -> 5
+                    else -> 99
+                }
+            }
+
+            val selectedPaths = treePaths
+                .filter { p ->
+                    val l = p.lowercase()
+                    !l.contains("/build/") && !l.contains("node_modules/") && filePriority(p) < 99
+                }
+                .sortedWith(compareBy<String>({ filePriority(it) }, { it.length }))
+                .take(12)
+
+            val fetchedFiles = mutableListOf<AuditedRepoFile>()
+            var licenseFileText = ""
+
+            for (path in selectedPaths) {
+                runCatching {
+                    val encodedPath = path.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+                    httpClient.newCall(ghGet("https://api.github.com/repos/$fullName/contents/$encodedPath?ref=$commitSha").build()).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use
+                        val obj = JSONObject(resp.body?.string().orEmpty())
+                        val encoded = obj.optString("content").replace("\n", "").replace("\r", "")
+                        if (encoded.isNotBlank()) {
+                            val decoded = String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
+                            fetchedFiles.add(AuditedRepoFile(path = path, content = decoded.take(30_000)))
+                            if (path.substringAfterLast("/").lowercase().startsWith("license") && licenseFileText.isBlank()) {
+                                licenseFileText = decoded.take(12_000)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Explicit license API fallback if not captured in tree sample
+            if (licenseFileText.isBlank()) {
+                runCatching {
+                    httpClient.newCall(ghGet("https://api.github.com/repos/$fullName/license").build()).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use
+                        val obj = JSONObject(resp.body?.string().orEmpty())
+                        val encoded = obj.optString("content").replace("\n", "").replace("\r", "")
+                        if (encoded.isNotBlank()) {
+                            licenseFileText = String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8).take(12_000)
+                        }
+                    }
+                }
+            }
+
+            GitHubRepoAuditBundle(
+                fullName = fullName,
+                htmlUrl = htmlUrl,
+                commitSha = commitSha,
+                licenseSpdx = licenseSpdx,
+                licenseText = licenseFileText,
+                stars = stars,
+                ownerLogin = ownerLogin,
+                ownerAccountAgeDays = ownerAgeDays,
+                files = fetchedFiles
+            )
+        }
+    }
+
+    suspend fun downloadGitHubCommitZip(
+        fullName: String,
+        commitSha: String,
+        githubToken: String? = null,
+        maxBytes: Int = 25 * 1024 * 1024
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanSha = commitSha.trim()
+            if (cleanSha.isBlank()) throw IllegalArgumentException("Commit SHA is required for immutable snapshot download.")
+            val req = Request.Builder()
+                .url("https://api.github.com/repos/$fullName/zipball/$cleanSha")
+                .addHeader("Accept", "application/vnd.github+json")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .apply {
+                    if (!githubToken.isNullOrBlank()) {
+                        addHeader("Authorization", "Bearer $githubToken")
+                    }
+                }
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val errBody = resp.body?.string().orEmpty()
+                    throw IllegalStateException(extractJsonError(errBody) ?: "GitHub ZIP download HTTP ${resp.code}")
+                }
+                val bytes = resp.body?.bytes() ?: throw IllegalStateException("Empty ZIP response")
+                if (bytes.isEmpty()) throw IllegalStateException("Downloaded commit ZIP is 0 bytes")
+                if (bytes.size > maxBytes) {
+                    throw IllegalStateException("Repository archive exceeds ${maxBytes / (1024 * 1024)} MB safety limit.")
+                }
+                bytes
+            }
         }
     }
 
