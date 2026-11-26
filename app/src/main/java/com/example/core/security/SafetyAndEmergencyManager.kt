@@ -25,6 +25,10 @@ class EmergencyStopController {
     private val _externalAiCallsEnabled = MutableStateFlow(true)
     val externalAiCallsEnabled: StateFlow<Boolean> = _externalAiCallsEnabled.asStateFlow()
 
+    private val autoModeEnabledFlag = AtomicBoolean(false)
+    private val _autoModeEnabled = MutableStateFlow(false)
+    val autoModeEnabled: StateFlow<Boolean> = _autoModeEnabled.asStateFlow()
+
     private val stopListeners = CopyOnWriteArrayList<() -> Unit>()
 
     fun addStopListener(listener: () -> Unit) {
@@ -36,9 +40,16 @@ class EmergencyStopController {
         _externalAiCallsEnabled.value = enabled
     }
 
+    fun setAutoModeEnabled(enabled: Boolean) {
+        autoModeEnabledFlag.set(enabled)
+        _autoModeEnabled.value = enabled
+    }
+
     fun isStopped(): Boolean = haltedFlag.get()
 
     fun isExternalAiAllowed(): Boolean = !haltedFlag.get() && externalAiAllowedFlag.get()
+
+    fun isAutoModeAllowed(): Boolean = !haltedFlag.get() && autoModeEnabledFlag.get()
 
     fun triggerEmergencyStop() {
         haltedFlag.set(true)

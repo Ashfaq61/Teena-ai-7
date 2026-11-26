@@ -11,6 +11,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.example.data.local.NotificationRecordEntity
 import com.example.data.local.TeenaDatabase
+import com.example.data.local.TeenaPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,6 +28,9 @@ class TeenaNotificationListenerService : NotificationListenerService() {
     companion object {
         private val _isConnected = MutableStateFlow(false)
         val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
+        @Volatile
+        var isWhatsAppReaderEnabled: Boolean = true
 
         private val replyActions = ConcurrentHashMap<String, Notification.Action>()
 
@@ -68,7 +72,14 @@ class TeenaNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         _isConnected.value = true
-        runCatching { activeNotifications?.forEach { recordSbn(it) } }
+        serviceScope.launch {
+            runCatching {
+                isWhatsAppReaderEnabled = TeenaPreferences(applicationContext)
+                    .getSettingsSnapshot()
+                    .whatsappNotifReaderEnabled
+            }
+            runCatching { activeNotifications?.forEach { recordSbn(it) } }
+        }
     }
 
     override fun onListenerDisconnected() {
@@ -83,10 +94,14 @@ class TeenaNotificationListenerService : NotificationListenerService() {
 
     private fun recordSbn(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return
+        val isWhatsApp = TeenaSpeechHelper.isWhatsAppPackageName(sbn.packageName)
+        if (isWhatsApp && !isWhatsAppReaderEnabled) return
+
         val extras = sbn.notification.extras
         val title = extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         if (title.isBlank() && text.isBlank()) return
+        if (isWhatsApp && text.matches(Regex("^\\d+\\s+new\\s+messages?$", RegexOption.IGNORE_CASE))) return
 
         val replyAction = sbn.notification.actions?.firstOrNull { !it.remoteInputs.isNullOrEmpty() }
         if (replyAction != null) {

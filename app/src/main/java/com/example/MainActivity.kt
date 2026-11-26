@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,6 +28,8 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,7 +50,9 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -61,6 +66,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.core.IncomingShareBridge
 import com.example.ui.screens.AboutTeenaScreen
 import com.example.ui.screens.AgentsAndCollabScreen
 import com.example.ui.screens.ApiManagerScreen
@@ -70,14 +76,23 @@ import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.ConfirmActionDialog
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.HubDirectoryScreen
+import com.example.ui.screens.IdentityAndPersonaScreen
+import com.example.ui.screens.MapsScreen
 import com.example.ui.screens.MarketplaceAndSelfImproveScreen
 import com.example.ui.screens.MemoryAndHistoryScreen
+import com.example.ui.screens.MusicStudioScreen
 import com.example.ui.screens.NotificationsAndRemindersScreen
 import com.example.ui.screens.PermissionsScreen
 import com.example.ui.screens.ResearchCenterScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.SketchScreen
+import com.example.ui.screens.TriggersScreen
 import com.example.ui.screens.VoiceAssistantScreen
+import com.example.ui.screens.VoiceRoomsScreen
+import com.example.ui.screens.WebsiteForgeScreen
+import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
+import com.example.ui.theme.StatusAmber
 import com.example.ui.theme.StatusCrimson
 import com.example.ui.theme.TeenaTheme
 import com.example.ui.viewmodel.TeenaViewModel
@@ -89,6 +104,8 @@ private data class TopNavItem(
 )
 
 class MainActivity : ComponentActivity() {
+    private var intentTick by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -97,21 +114,39 @@ class MainActivity : ComponentActivity() {
             val settings by viewModel.settings.collectAsStateWithLifecycle()
 
             TeenaTheme(darkTheme = settings.darkTheme) {
-                TeenaRootScaffold(viewModel = viewModel)
+                TeenaRootScaffold(
+                    viewModel = viewModel,
+                    shareRouteExtra = intent?.getStringExtra(IncomingShareBridge.EXTRA_SHARE_ROUTE),
+                    shareTabExtra = intent?.getIntExtra(IncomingShareBridge.EXTRA_OPEN_AUTOMATION_TAB, -1),
+                    shareEventTick = intentTick
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intentTick++
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TeenaRootScaffold(viewModel: TeenaViewModel) {
+fun TeenaRootScaffold(
+    viewModel: TeenaViewModel,
+    shareRouteExtra: String? = null,
+    shareTabExtra: Int? = null,
+    shareEventTick: Int = 0
+) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: "dashboard"
 
     val banner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val pendingConfirm by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
+    val pendingScreenConfirm by viewModel.pendingScreenConfirmation.collectAsStateWithLifecycle()
+    val screenWatchState by viewModel.screenWatchState.collectAsStateWithLifecycle()
     val emergencyStopped by viewModel.isEmergencyStopped.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -120,6 +155,18 @@ fun TeenaRootScaffold(viewModel: TeenaViewModel) {
         if (!msg.isNullOrBlank()) {
             snackbarHostState.showSnackbar(msg)
             viewModel.clearBanner()
+        }
+    }
+
+    LaunchedEffect(shareEventTick, shareRouteExtra, shareTabExtra) {
+        val destRoute = viewModel.consumePendingIncomingShare(
+            requestedRoute = shareRouteExtra,
+            requestedTab = shareTabExtra?.takeIf { it >= 0 }
+        )
+        if (!destRoute.isNullOrBlank() && destRoute != currentRoute) {
+            navController.navigate(destRoute) {
+                launchSingleTop = true
+            }
         }
     }
 
@@ -145,7 +192,14 @@ fun TeenaRootScaffold(viewModel: TeenaViewModel) {
         "memory" -> "Memory & History"
         "build_center" -> "APK Build Center"
         "notifications" -> "Notifications & Tasks"
+        "triggers" -> "Triggers & Keyboard"
         "permissions" -> "Permissions"
+        "identity" -> "Teena Identity & Persona"
+        "voice_rooms" -> "Voice Rooms & LiveKit"
+        "music_studio" -> "Teena Music Studio"
+        "website_forge" -> "Teena Website Forge"
+        "maps" -> "Teena Interactive Maps"
+        "sketch" -> "Teena Sketch Pad"
         "settings" -> "Settings"
         "about" -> "About Teena"
         else -> "Teena AI"
@@ -166,6 +220,39 @@ fun TeenaRootScaffold(viewModel: TeenaViewModel) {
         pending = pendingConfirm,
         onDismiss = { viewModel.dismissConfirmation() }
     )
+
+    pendingScreenConfirm?.let { screenPending ->
+        AlertDialog(
+            onDismissRequest = { viewModel.respondToPendingScreenConfirmation(false) },
+            title = { Text(screenPending.title, style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "App: ${screenPending.targetApp.ifBlank { "Unknown" }} • Action: ${screenPending.actionType}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NeuralCyan
+                    )
+                    Text(screenPending.exactActionDescription, style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.respondToPendingScreenConfirmation(true) },
+                    modifier = Modifier.testTag("screen_confirm_allow_btn")
+                ) {
+                    Text("Authorize")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { viewModel.respondToPendingScreenConfirmation(false) },
+                    modifier = Modifier.testTag("screen_confirm_cancel_btn")
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 680.dp
@@ -243,6 +330,37 @@ fun TeenaRootScaffold(viewModel: TeenaViewModel) {
                                 Text("Resume", style = MaterialTheme.typography.labelSmall)
                             }
                         }
+                    } else if (screenWatchState.isWatching) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(StatusAmber.copy(alpha = 0.20f))
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .testTag("screen_watching_banner"),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Visibility,
+                                contentDescription = "Screen watching active",
+                                tint = StatusAmber,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "Teena screen dekh rahi hai • Step ${screenWatchState.stepNumber}/${screenWatchState.maxSteps} (${screenWatchState.phase})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = StatusAmber,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = { viewModel.stopScreenAgentGoal() },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("Stop", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
                     }
                 }
             },
@@ -287,21 +405,34 @@ fun TeenaRootScaffold(viewModel: TeenaViewModel) {
                         modifier = Modifier.fillMaxSize()
                     ) {
                         composable("dashboard") { DashboardScreen(viewModel, onNavigate = ::navigateTo) }
-                        composable("chat") { ChatScreen(viewModel) }
+                        composable("chat") { ChatScreen(viewModel, onOpenWebsiteForge = { navigateTo("website_forge") }) }
                         composable("voice") { VoiceAssistantScreen(viewModel) }
                         composable("agents") { AgentsAndCollabScreen(viewModel) }
                         composable("hub") { HubDirectoryScreen(onNavigate = ::navigateTo) }
                         composable("automation") {
-                            AutomationAndDeviceScreen(viewModel, onNavigateToChat = { navigateTo("chat") })
+                            AutomationAndDeviceScreen(
+                                viewModel = viewModel,
+                                onNavigateToChat = { navigateTo("chat") },
+                                onOpenMaps = { navigateTo("maps") }
+                            )
                         }
                         composable("marketplace") { MarketplaceAndSelfImproveScreen(viewModel) }
                         composable("research") { ResearchCenterScreen(viewModel) }
                         composable("api_manager") { ApiManagerScreen(viewModel) }
                         composable("memory") { MemoryAndHistoryScreen(viewModel) }
                         composable("build_center") { ApkBuildCenterScreen(viewModel) }
-                        composable("notifications") { NotificationsAndRemindersScreen(viewModel) }
+                        composable("notifications") {
+                            NotificationsAndRemindersScreen(viewModel, onOpenTriggers = { navigateTo("triggers") })
+                        }
+                        composable("triggers") { TriggersScreen(viewModel) }
                         composable("permissions") { PermissionsScreen(viewModel) }
-                        composable("settings") { SettingsScreen(viewModel) }
+                        composable("identity") { IdentityAndPersonaScreen(viewModel) }
+                        composable("voice_rooms") { VoiceRoomsScreen(viewModel, onOpenSettings = { navigateTo("settings") }) }
+                        composable("music_studio") { MusicStudioScreen(viewModel, onOpenApiManager = { navigateTo("api_manager") }) }
+                        composable("website_forge") { WebsiteForgeScreen(viewModel, onOpenApiManager = { navigateTo("api_manager") }) }
+                        composable("maps") { MapsScreen(viewModel) }
+                        composable("sketch") { SketchScreen(viewModel, onNavigateToChat = { navigateTo("chat") }) }
+                        composable("settings") { SettingsScreen(viewModel, onOpenIdentity = { navigateTo("identity") }) }
                         composable("about") { AboutTeenaScreen(viewModel) }
                     }
                 }

@@ -58,7 +58,8 @@ data class GitHubRepoAuditBundle(
     val stars: Int,
     val ownerLogin: String,
     val ownerAccountAgeDays: Long?,
-    val files: List<AuditedRepoFile>
+    val files: List<AuditedRepoFile>,
+    val readmeText: String = ""
 )
 
 data class HuggingFaceModelDetail(
@@ -69,6 +70,19 @@ data class HuggingFaceModelDetail(
     val license: String,
     val tags: List<String>,
     val compatibilityNotes: String,
+    val url: String
+)
+
+data class HuggingFaceModelCardBundle(
+    val modelId: String,
+    val pipelineTag: String,
+    val downloads: Long,
+    val likes: Int,
+    val license: String,
+    val tags: List<String>,
+    val compatibilityNotes: String,
+    val readmeText: String,
+    val configJsonText: String,
     val url: String
 )
 
@@ -669,6 +683,18 @@ class TeenaNetworkClients(
                 }
             }
 
+            // Fetch README.md strictly as passive data for capability summarization (never treated as commands)
+            val readmeContent = runCatching {
+                httpClient.newCall(ghGet("https://api.github.com/repos/$fullName/readme?ref=$commitSha").build()).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use ""
+                    val obj = JSONObject(resp.body?.string().orEmpty())
+                    val encoded = obj.optString("content").replace("\n", "").replace("\r", "")
+                    if (encoded.isNotBlank()) {
+                        String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8).take(8_000)
+                    } else ""
+                }
+            }.getOrDefault("")
+
             GitHubRepoAuditBundle(
                 fullName = fullName,
                 htmlUrl = htmlUrl,
@@ -678,7 +704,8 @@ class TeenaNetworkClients(
                 stars = stars,
                 ownerLogin = ownerLogin,
                 ownerAccountAgeDays = ownerAgeDays,
-                files = fetchedFiles
+                files = fetchedFiles,
+                readmeText = readmeContent
             )
         }
     }
@@ -767,6 +794,75 @@ class TeenaNetworkClients(
                     )
                 }
             }
+        }
+    }
+
+    suspend fun fetchHuggingFaceModelCardBundle(
+        modelId: String,
+        deviceRamGb: Float = 4f
+    ): Result<HuggingFaceModelCardBundle> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanId = modelId.trim()
+            val metaReq = Request.Builder()
+                .url("https://huggingface.co/api/models/$cleanId")
+                .addHeader("User-Agent", "TeenaAI-Android")
+                .get()
+                .build()
+            val item = httpClient.newCall(metaReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException("HuggingFace model HTTP ${resp.code}")
+                JSONObject(body)
+            }
+            val tagsArr = item.optJSONArray("tags") ?: JSONArray()
+            val tags = (0 until tagsArr.length()).map { tagsArr.optString(it) }
+            val license = tags.firstOrNull { it.startsWith("license:") }
+                ?.removePrefix("license:") ?: "Check model card"
+            val pipeline = item.optString("pipeline_tag", "general")
+            val isMobileFriendly = tags.any {
+                it.contains("tflite", true) || it.contains("onnx", true) ||
+                    it.contains("gguf", true) || it.contains("mediapipe", true) ||
+                    cleanId.contains("mobile", true) || cleanId.contains("tiny", true) ||
+                    cleanId.contains("mini", true) || cleanId.contains("nano", true)
+            }
+            val compat = buildString {
+                append(if (isMobileFriendly) "Edge/Mobile-compatible format detected. " else "Cloud/Server inference recommended. ")
+                append("Device RAM: ${"%.1f".format(deviceRamGb)} GB.")
+            }
+
+            val readmeText = runCatching {
+                val req = Request.Builder()
+                    .url("https://huggingface.co/$cleanId/raw/main/README.md")
+                    .addHeader("User-Agent", "TeenaAI-Android")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string().orEmpty().take(7_000) else ""
+                }
+            }.getOrDefault("")
+
+            val configText = runCatching {
+                val req = Request.Builder()
+                    .url("https://huggingface.co/$cleanId/raw/main/config.json")
+                    .addHeader("User-Agent", "TeenaAI-Android")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string().orEmpty().take(3_000) else ""
+                }
+            }.getOrDefault("")
+
+            HuggingFaceModelCardBundle(
+                modelId = cleanId,
+                pipelineTag = pipeline,
+                downloads = item.optLong("downloads", 0L),
+                likes = item.optInt("likes", 0),
+                license = license,
+                tags = tags.take(16),
+                compatibilityNotes = compat,
+                readmeText = readmeText,
+                configJsonText = configText,
+                url = "https://huggingface.co/$cleanId"
+            )
         }
     }
 

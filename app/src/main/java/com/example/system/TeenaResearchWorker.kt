@@ -10,8 +10,11 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.example.ai.CapabilitySummaryAnalyzer
 import com.example.ai.ToolCreationPipelineEngine
 import com.example.core.TeenaServiceContainer
+import com.example.core.security.RepoRiskAnalyzer
+import com.example.core.security.RepoRiskLevel
 import com.example.core.security.SecurityAuditor
 import com.example.data.local.AuditLogEntity
 import com.example.data.local.MarketplaceToolEntity
@@ -31,11 +34,11 @@ data class ResearchCycleOutcome(
 
 /**
  * WorkManager background worker for scheduled self-improvement research:
- * - Researches new Gemini models via ModelRegistry, GitHub Android tools, Hugging Face models,
- *   and latest Android/Gemini updates via web search.
- * - Asks ExternalAgentHub advisors to evaluate discovered candidates (when External AI Calls allowed).
- * - Creates Marketplace proposals with status `PROPOSED` (requiring user approval to run the 11-stage pipeline).
- * - Respects Emergency Stop immediately.
+ * - Refreshes ModelRegistry, searches GitHub, HuggingFace, and web updates.
+ * - Detects Teena capability gaps from all 4 sources and consults >=2 External AI Advisors
+ *   (respecting user toggle, Emergency Stop, and hourly rate limit; never leaking keys/PII).
+ * - Creates Marketplace `PROPOSED` tools with real 4-part capability briefs & pipeline stages.
+ * - If Auto Mode is enabled, safely auto-activates eligible zero-permission declarative tools only.
  */
 class TeenaResearchWorker(
     appContext: Context,
@@ -59,9 +62,9 @@ class TeenaResearchWorker(
                 val db = container.database
                 val network = container.networkClients
                 val prefs = container.preferences
+                val settings = prefs.getSettingsSnapshot()
 
                 var modelsCount = 0
-                val findings = mutableListOf<String>()
 
                 // 1. Refresh Gemini ModelRegistry if key exists
                 val geminiKey = container.aiBrain.resolvePrimaryGeminiSlotAndKey().second
@@ -69,7 +72,6 @@ class TeenaResearchWorker(
                     val refreshed = network.modelRegistry.refreshAndCacheModels(geminiKey).getOrNull()
                     if (refreshed != null) {
                         modelsCount = refreshed.size
-                        findings.add("Refreshed $modelsCount Gemini models in ModelRegistry.")
                     }
                 }
 
@@ -106,8 +108,8 @@ class TeenaResearchWorker(
                     )
                 }
 
-                // 4. Web research on latest Android / Gemini API updates
-                val webUpdates = network.searchWeb("Android Jetpack Gemini Live API updates").getOrNull().orEmpty()
+                // 4. Web research on latest Android / Gemini / AI updates
+                val webUpdates = network.searchWeb("Android Jetpack Gemini API AI tools updates").getOrNull().orEmpty()
                 webUpdates.take(2).forEach { w ->
                     db.researchDao().insertResearch(
                         ResearchEntryEntity(
@@ -120,21 +122,27 @@ class TeenaResearchWorker(
                     )
                 }
 
-                // 5. Consult external advisors for evaluation (only if enabled by user)
-                var advisorNote = "Local evaluation only (External AI Calls disabled or <2 advisors ready)."
+                // 5. Consult >=2 external advisors on latest Android/AI tools, GitHub/HF projects & Teena's gaps
+                val gaps = container.externalAgentHub.detectCapabilityGaps()
+                var advisorNote = "Local evaluation only (External AI Calls disabled, rate-limited, or <2 advisors ready)."
                 var proposedBy = "Teena Scheduled Research"
                 if (container.emergencyStopController.isExternalAiAllowed()) {
                     val evalQuestion = buildString {
-                        appendLine("Evaluate these newly discovered candidates for Teena AI (Android Kotlin assistant):")
-                        ghRepos.take(2).forEach { appendLine("- GitHub: ${it.fullName} (${it.licenseSpdx}, ${it.stars}★): ${it.description.take(90)}") }
-                        hfModels.take(2).forEach { appendLine("- HuggingFace: ${it.modelId} (${it.license}): ${it.compatibilityNotes}") }
-                        appendLine("Which candidate is safest and most practical as a declarative Marketplace tool proposal? Reply concisely.")
+                        appendLine("Teena AI scheduled technical check-in (Android Kotlin + Jetpack Compose assistant).")
+                        appendLine("1) Latest Android / Jetpack / AI features or Play-Policy-safe libraries (MIT/Apache-2.0)?")
+                        appendLine("2) Useful new GitHub/HuggingFace projects?")
+                        ghRepos.take(2).forEach { appendLine("   - GitHub: ${it.fullName} (${it.licenseSpdx}, ${it.stars}★): ${it.description.take(80)}") }
+                        hfModels.take(2).forEach { appendLine("   - HuggingFace: ${it.modelId} (${it.license}): ${it.compatibilityNotes}") }
+                        appendLine("3) Teena current detected gaps:")
+                        gaps.take(2).forEach { appendLine("   - ${it.title}: ${it.reason.take(100)}") }
+                        appendLine("Recommend safest declarative tools or improvements.")
                     }
                     val collab = container.externalAgentHub.consultExternalAdvisors(
-                        topic = "Scheduled Research Evaluation",
+                        topic = "Scheduled Android/AI & Gap Research",
                         rawTechnicalQuestion = evalQuestion,
-                        gapReason = "WorkManager periodic model/tool discovery",
-                        minAdvisorsToAsk = 2
+                        gapReason = "WorkManager periodic model/tool & gap discovery",
+                        minAdvisorsToAsk = 2,
+                        hourlyLimit = settings.advisorHourlyRateLimit
                     ).getOrNull()
                     if (collab != null && collab.advisorCountSucceeded > 0) {
                         val names = collab.messages.filter { it.succeeded }.joinToString(", ") { it.advisorName }
@@ -143,7 +151,7 @@ class TeenaResearchWorker(
                     }
                 }
 
-                // 6. Save top clean proposal into Marketplace as `PROPOSED` (never auto-installed)
+                // 6. Inspect & summarize top GitHub candidate + convert gaps into PROPOSED Marketplace entries
                 var proposalsAdded = 0
                 val existingTools = db.marketplaceToolDao().getToolsOnce().map { it.toolId }.toSet()
                 val topGh = ghRepos.firstOrNull {
@@ -152,40 +160,83 @@ class TeenaResearchWorker(
                 if (topGh != null) {
                     val propId = "prop_${topGh.fullName.lowercase().replace(Regex("[^a-z0-9]+"), "_").take(26)}"
                     if (propId !in existingTools) {
-                        val scan = SecurityAuditor.auditToolOrCode(topGh.fullName, topGh.htmlUrl, topGh.licenseSpdx, topGh.htmlUrl)
-                        val specJson = JSONObject().apply {
-                            put("toolName", topGh.fullName.substringAfter('/').take(28))
-                            put("category", "Research Proposal")
-                            put("description", topGh.description.take(160))
-                            put("actionType", "GITHUB_REPO_INSPECTOR")
-                            put("endpointOrTarget", topGh.htmlUrl)
-                            put("licenseSpdx", topGh.licenseSpdx)
-                        }.toString()
-                        val ts = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
-                        db.marketplaceToolDao().upsertTool(
-                            MarketplaceToolEntity(
-                                toolId = propId,
-                                name = topGh.fullName.substringAfter('/').take(34),
-                                description = "[PROPOSED] ${topGh.description.take(180)}",
-                                version = "0.1.0-proposal",
-                                category = "Research Proposal",
-                                sourceRepo = topGh.htmlUrl,
-                                licenseSpdx = topGh.licenseSpdx,
-                                executionSpec = specJson,
-                                isBuiltIn = false,
-                                isInstalled = false,
-                                activationStatus = "PROPOSED",
-                                securityScore = scan.score,
-                                securityNotes = scan.findings.joinToString("; "),
-                                testResult = "Proposed by research cycle; approve to run 11-stage pipeline",
-                                proposedBy = proposedBy,
-                                scanResult = "PRE-SCAN PASSED (${scan.score}/100, ${scan.licenseStatus})",
-                                toolKind = "DECLARATIVE_JSON",
-                                pipelineStagesJson = ToolCreationPipelineEngine.defaultStagesJson(),
-                                historyLog = "[$ts] Proposed by $proposedBy\n$advisorNote"
+                        val bundle = network.fetchGitHubRepoAuditBundle(topGh.fullName, ghToken).getOrNull()
+                        var briefJson = ""
+                        var scanScore = topGh.securityScore
+                        var scanHeadline = "PRE-SCAN PASSED (${topGh.securityScore}/100)"
+                        var isSafeToPropose = true
+
+                        if (bundle != null) {
+                            val risk = RepoRiskAnalyzer.analyzeRealCode(
+                                repoFullName = bundle.fullName,
+                                repoUrl = bundle.htmlUrl,
+                                commitSha = bundle.commitSha,
+                                licenseSpdx = bundle.licenseSpdx,
+                                licenseText = bundle.licenseText,
+                                stars = bundle.stars,
+                                ownerLogin = bundle.ownerLogin,
+                                ownerAccountAgeDays = bundle.ownerAccountAgeDays,
+                                files = bundle.files
                             )
+                            isSafeToPropose = risk.codeReviewed && risk.riskLevel != RepoRiskLevel.KHATARNAAK && risk.proposeAllowed
+                            scanScore = risk.riskScore
+                            scanHeadline = "${risk.riskLevel.label} (${risk.riskScore}/100)"
+                            val summary = CapabilitySummaryAnalyzer.analyzeGitHubRepo(container.aiBrain, bundle, risk)
+                            db.capabilitySummaryDao().upsert(summary)
+                            briefJson = CapabilitySummaryAnalyzer.toJsonString(summary)
+                        }
+
+                        if (isSafeToPropose) {
+                            val specJson = JSONObject().apply {
+                                put("toolName", topGh.fullName.substringAfter('/').take(28))
+                                put("category", "Research Proposal")
+                                put("description", topGh.description.take(160))
+                                put("actionType", "GITHUB_REPO_INSPECTOR")
+                                put("endpointOrTarget", topGh.htmlUrl)
+                                put("licenseSpdx", topGh.licenseSpdx)
+                            }.toString()
+                            val ts = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+                            db.marketplaceToolDao().upsertTool(
+                                MarketplaceToolEntity(
+                                    toolId = propId,
+                                    name = topGh.fullName.substringAfter('/').take(34),
+                                    description = "[PROPOSED] ${topGh.description.take(180)}",
+                                    version = "0.1.0-proposal",
+                                    category = "Research Proposal",
+                                    sourceRepo = topGh.htmlUrl,
+                                    licenseSpdx = topGh.licenseSpdx,
+                                    executionSpec = specJson,
+                                    isBuiltIn = false,
+                                    isInstalled = false,
+                                    activationStatus = "PROPOSED",
+                                    securityScore = scanScore,
+                                    securityNotes = scanHeadline,
+                                    testResult = "Proposed by research cycle; tap Run 10-Stage Pipeline",
+                                    proposedBy = proposedBy,
+                                    scanResult = scanHeadline,
+                                    toolKind = "KOTLIN_GITHUB_BRANCH",
+                                    pipelineStagesJson = ToolCreationPipelineEngine.defaultStagesJson(),
+                                    historyLog = "[$ts] Proposed by $proposedBy\n$advisorNote",
+                                    capabilitySummaryJson = briefJson
+                                )
+                            )
+                            proposalsAdded++
+                        }
+                    }
+                }
+
+                // Also turn 4-source gaps (health, failures, user requests, advisor suggestions) into PROPOSED items
+                val gapProposals = container.toolPipelineEngine.detectGapsAndCreateProposals()
+                proposalsAdded += gapProposals.size
+
+                // 7. If Auto Mode is ON (and not emergency stopped), auto-run eligible zero-permission declarative gap proposals
+                if (settings.autoActivateSafeDeclarativeTools && container.emergencyStopController.isAutoModeAllowed()) {
+                    gapProposals.take(1).forEach { prop ->
+                        container.toolPipelineEngine.runPipelineUntilUserApproval(
+                            capabilityGoal = prop.name,
+                            toolKind = prop.toolKind,
+                            existingToolId = prop.toolId
                         )
-                        proposalsAdded++
                     }
                 }
 

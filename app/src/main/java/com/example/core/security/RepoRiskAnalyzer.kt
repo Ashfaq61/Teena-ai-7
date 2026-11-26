@@ -236,13 +236,13 @@ object RepoRiskAnalyzer {
             !lower.endsWith(".md") && !lower.endsWith(".txt") || lower.endsWith("requirements.txt")
         }
 
-        if (files.isEmpty()) {
+        if (files.isEmpty() || codeAndConfigFiles.isEmpty()) {
             val base = createUnreviewedPlaceholder(repoFullName, repoUrl, normLic, stars, ownerLogin)
             return base.copy(
                 commitSha = commitSha,
                 licenseText = licenseText,
                 ownerAccountAgeDays = ownerAccountAgeDays,
-                headlineBanner = "NOT DONE: Repo se koi code file fetch nahi ho saki — isay Safe nahi maan sakte."
+                headlineBanner = "NOT DONE: Repo se koi asli code/manifest file fetch nahi ho saki — isay Safe nahi maan sakte."
             )
         }
 

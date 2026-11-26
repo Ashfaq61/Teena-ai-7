@@ -329,13 +329,15 @@ class MultiAgentOrchestrator(
                 name = "Android Screen Vision & Automation",
                 status = when {
                     !perms.accessibilityEnabled -> FeatureStatus.BLOCKED
-                    verifications["accessibility"]?.runtimeTestPassed == true -> FeatureStatus.ACTIVE
+                    verifications["accessibility"]?.runtimeTestPassed == true &&
+                        com.example.system.TeenaAccessibilityService.runtimeVerifiedOnDevice -> FeatureStatus.ACTIVE
                     else -> FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED
                 },
                 reason = when {
                     !perms.accessibilityEnabled -> "Blocked until user enables Teena AI in Android Accessibility Settings."
-                    verifications["accessibility"]?.runtimeTestPassed == true -> verifications["accessibility"]!!.lastTestSummary
-                    else -> "AccessibilityService bound; capture live tree or run Self-Test to verify."
+                    verifications["accessibility"]?.runtimeTestPassed == true &&
+                        com.example.system.TeenaAccessibilityService.runtimeVerifiedOnDevice -> verifications["accessibility"]!!.lastTestSummary
+                    else -> "IMPLEMENTED NOT DEVICE-VERIFIED: capture screenshot + UI tree or run a verified screen step on device."
                 }
             ),
             run {
@@ -367,6 +369,14 @@ class MultiAgentOrchestrator(
                     implementedSummary = "CameraX Photo + VideoCapture + Front/Rear switch implemented; capture once or run Self-Test."
                 )
                 FeatureHealthItem("camera_media", "CameraX, Flashlight, Volume & Media", st, msg)
+            },
+            run {
+                val (st, msg) = checkRuntimeOrImplemented(
+                    featureId = "face_detection",
+                    prereqBlockedReason = if (!perms.camera) "Requires explicit CAMERA permission (on-device ML Kit only; zero face data stored/uploaded)." else null,
+                    implementedSummary = "On-device ML Kit Face Detection ready; zero face data stored or uploaded."
+                )
+                FeatureHealthItem("face_detection", "On-Device Face Detection (ML Kit)", st, msg)
             },
             run {
                 val (st, msg) = checkRuntimeOrImplemented(
@@ -403,6 +413,14 @@ class MultiAgentOrchestrator(
                     implementedSummary = "Location + Maps navigation implemented; fetch GPS or run Self-Test to verify."
                 )
                 FeatureHealthItem("maps_location", "Google Maps & Location", st, msg)
+            },
+            run {
+                val (st, msg) = checkRuntimeOrImplemented(
+                    featureId = "rooms_webrtc",
+                    partialReason = "Optional external Rooms Server / LiveKit endpoint & MediaProjection screen share ready (disabled until configured in Settings).",
+                    implementedSummary = "Group voice/video, LiveKit WebRTC, MediaProjection FGS, and optional Firebase Auth/FCM implemented."
+                )
+                FeatureHealthItem("rooms_webrtc", "Group Rooms (LiveKit WebRTC)", st, msg)
             },
             run {
                 val (st, msg) = checkRuntimeOrImplemented(
@@ -502,15 +520,23 @@ class MultiAgentOrchestrator(
             )
         )
 
-        // 5. Accessibility runtime bind check
+        // 5. Accessibility runtime bind + real device capture check
+        val accVerified = perms.accessibilityEnabled && com.example.system.TeenaAccessibilityService.runtimeVerifiedOnDevice
         results.add(
             FeatureVerificationEntity(
                 featureId = "accessibility",
-                status = if (perms.accessibilityEnabled) FeatureStatus.ACTIVE.name else FeatureStatus.BLOCKED.name,
-                runtimeTestPassed = perms.accessibilityEnabled,
-                deviceVerified = perms.accessibilityEnabled,
-                lastTestSummary = if (perms.accessibilityEnabled) "Verified TeenaAccessibilityService bound."
-                else "Blocked: AccessibilityService not enabled."
+                status = when {
+                    !perms.accessibilityEnabled -> FeatureStatus.BLOCKED.name
+                    accVerified -> FeatureStatus.ACTIVE.name
+                    else -> FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name
+                },
+                runtimeTestPassed = accVerified,
+                deviceVerified = accVerified,
+                lastTestSummary = when {
+                    !perms.accessibilityEnabled -> "Blocked: AccessibilityService not enabled."
+                    accVerified -> "Verified TeenaAccessibilityService bound with real UI/screenshot capture."
+                    else -> "Accessibility enabled in settings; awaiting real on-device screen capture/action."
+                }
             )
         )
 

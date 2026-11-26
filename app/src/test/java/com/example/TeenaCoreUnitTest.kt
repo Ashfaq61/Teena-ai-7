@@ -3,6 +3,8 @@ package com.example
 import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Rect
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.ai.AiBrainEngine
@@ -10,6 +12,8 @@ import com.example.ai.ExternalAgentHub
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
 import com.example.ai.SafeToolInterpreter
+import com.example.ai.ScreenAutomationDriver
+import com.example.ai.ScreenVisionAgentEngine
 import com.example.ai.ToolCreationPipelineEngine
 import com.example.core.security.EmergencyStopController
 import com.example.core.security.KeystoreSecretVault
@@ -24,8 +28,15 @@ import com.example.data.local.ProviderType
 import com.example.data.local.TeenaDatabase
 import com.example.data.local.TeenaPreferences
 import com.example.data.remote.TeenaNetworkClients
+import com.example.system.AutomationResult
 import com.example.system.PermissionStatusManager
+import com.example.system.ScreenSafetyDetector
+import com.example.system.ScreenSnapshot
+import com.example.system.SecureScreenException
 import com.example.system.TeenaAccessibilityService
+import com.example.system.UiNodeSummary
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
@@ -812,5 +823,360 @@ class TeenaCoreUnitTest {
             saved.zipSha256,
             "repo-main/src/Sample.kt"
         ).isFailure)
+    }
+
+    @Test
+    fun capabilitySummariesPersistAndAdvisorRateLimitAndFourSourceGapsWork() = runTest {
+        val summary = com.example.data.local.CapabilitySummaryEntity(
+            itemKey = "github:kotlin/sample",
+            sourceType = "GITHUB",
+            title = "kotlin/sample",
+            sourceUrl = "https://github.com/kotlin/sample",
+            commitOrRevision = "abc123",
+            kyaKartaHai = "Ye library Kotlin text formatting karti hai.",
+            teenaMeinKyaAddHoga = "Marketplace mein declarative text formatter add hoga.",
+            zarooriCheezein = "Zero permissions, offline chalti hai.",
+            haddAurKhatre = "Koi security risk nahi mila.",
+            modelUsed = "gemini-3.8-flash",
+            status = "READY"
+        )
+        db.capabilitySummaryDao().upsert(summary)
+        val loaded = db.capabilitySummaryDao().getByKey("github:kotlin/sample")
+        assertEquals("READY", loaded?.status)
+        assertEquals("gemini-3.8-flash", loaded?.modelUsed)
+
+        // Seed user request & advisor suggestion for 4-source gap detection
+        val convId = db.conversationDao().upsertConversation(com.example.data.local.ConversationEntity(title = "Req"))
+        db.conversationDao().insertMessage(
+            com.example.data.local.MessageEntity(
+                conversationId = convId,
+                role = "user",
+                content = "Teena ek offline JSON formatter tool banao"
+            )
+        )
+        db.externalCollabDao().insertMessage(
+            com.example.data.local.ExternalCollabMessageEntity(
+                sessionId = "s1",
+                topic = "JSON Formatter",
+                detectedGapReason = "User asked",
+                questionSent = "Suggest safe tool",
+                advisorId = "adv1",
+                advisorName = "AdvisorOne",
+                advisorModel = "model-1",
+                protocolUsed = "OPENAI_COMPAT",
+                rawResponse = "Use SafeToolInterpreter JSON_FORMATTER",
+                succeeded = true
+            )
+        )
+
+        val stopCtrl = EmergencyStopController()
+        val vault = KeystoreSecretVault(context)
+        val network = TeenaNetworkClients(db.geminiModelDao(), emergencyStopController = stopCtrl)
+        val hub = ExternalAgentHub(db, vault, network, stopCtrl)
+
+        val gaps = hub.detectCapabilityGaps()
+        assertTrue(gaps.any { it.reason.contains("[User Request]") })
+        assertTrue(gaps.any { it.reason.contains("[Advisor") })
+
+        // Hourly rate limit: 1 message already recorded in last hour; limit=1 blocks next advisor consultation
+        val quota = hub.getAdvisorQuotaStatus(limitPerHour = 1)
+        assertEquals(1, quota.usedLastHour)
+        assertEquals(0, quota.remaining)
+        val throttled = hub.consultExternalAdvisors("Test", "Design formatter", hourlyLimit = 1)
+        assertTrue(throttled.isFailure)
+        assertTrue(throttled.exceptionOrNull()?.message?.contains("rate limit", ignoreCase = true) == true)
+    }
+
+    @Test
+    fun autoModeActivatesZeroPermToolPostsNotificationSupportsUndoAndEmergencyStopHaltsIt() = runTest {
+        val stopCtrl = EmergencyStopController()
+        val vault = KeystoreSecretVault(context)
+        val network = TeenaNetworkClients(db.geminiModelDao(), emergencyStopController = stopCtrl)
+        val offlineEngine = OfflineCapabilitiesEngine(context)
+        val aiBrain = AiBrainEngine(db, vault, network, offlineEngine, stopCtrl)
+        val hub = ExternalAgentHub(db, vault, network, stopCtrl)
+        val interpreter = SafeToolInterpreter(network, stopCtrl)
+        val prefs = TeenaPreferences(context)
+        prefs.updateSettings { it.copy(autoActivateSafeDeclarativeTools = true) }
+        stopCtrl.setAutoModeEnabled(true)
+
+        val pipeline = ToolCreationPipelineEngine(db, aiBrain, hub, interpreter, network, vault, prefs, stopCtrl, context)
+        val safeSpec = """{"toolName":"Offline Json Pretty","category":"Utility","description":"Formats JSON","actionType":"JSON_FORMATTER","endpointOrTarget":"","permissionsRequired":[],"licenseSpdx":"Apache-2.0"}"""
+        db.marketplaceToolDao().upsertTool(
+            MarketplaceToolEntity(
+                toolId = "tool_auto_json",
+                name = "Offline Json Pretty",
+                description = "Formats JSON",
+                version = "1.0.0",
+                category = "Utility",
+                sourceRepo = "builtin://teena",
+                licenseSpdx = "Apache-2.0",
+                executionSpec = safeSpec,
+                toolKind = "DECLARATIVE_JSON"
+            )
+        )
+
+        val autoTool = pipeline.runPipelineUntilUserApproval("Offline Json Pretty", "DECLARATIVE_JSON", "tool_auto_json")
+        assertTrue(autoTool.isInstalled)
+        assertTrue(autoTool.autoActivated)
+        assertEquals(FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name, autoTool.activationStatus)
+
+        // Undo reverses auto-activation cleanly
+        val undone = pipeline.undoAutoActivatedTool("tool_auto_json").getOrThrow()
+        assertFalse(undone.isInstalled)
+        assertFalse(undone.autoActivated)
+        assertEquals("PROPOSED", undone.activationStatus)
+
+        // Emergency Stop halts Auto Mode immediately
+        stopCtrl.triggerEmergencyStop()
+        assertFalse(stopCtrl.isAutoModeAllowed())
+        val blockedByStop = pipeline.runPipelineUntilUserApproval("Offline Json Pretty", "DECLARATIVE_JSON", "tool_auto_json")
+        assertEquals(FeatureStatus.BLOCKED.name, blockedByStop.activationStatus)
+        assertFalse(blockedByStop.isInstalled)
+    }
+
+    @Test
+    fun screenSafetyDetectorBlocksPasswordOtpBankingAndFlagSecureOnly() {
+        val youtubeSnap = ScreenSnapshot(
+            packageName = "com.google.android.youtube",
+            windowClass = "com.google.android.youtube.HomeActivity",
+            visibleText = listOf("Home", "Shorts", "Search YouTube"),
+            nodes = listOf(
+                UiNodeSummary("Search", "Search", "com.google.android.youtube:id/menu_search", "ImageView", true, false, false, Rect(900, 50, 1020, 150))
+            )
+        )
+        assertFalse(ScreenSafetyDetector.detectSecureScreen(youtubeSnap, windowFlagsSecure = false).first)
+
+        // FLAG_SECURE
+        assertTrue(ScreenSafetyDetector.detectSecureScreen(youtubeSnap, windowFlagsSecure = true).first)
+
+        // Password input field
+        val pwdSnap = youtubeSnap.copy(
+            packageName = "com.example.app",
+            nodes = listOf(
+                UiNodeSummary("••••", "Password", "pwd", "EditText", true, true, false, Rect(10, 10, 400, 80), focused = true, isPassword = true)
+            )
+        )
+        assertTrue(ScreenSafetyDetector.detectSecureScreen(pwdSnap).first)
+
+        // Banking package & OTP text
+        val bankSnap = youtubeSnap.copy(packageName = "com.jazzcash.customer")
+        assertTrue(ScreenSafetyDetector.detectSecureScreen(bankSnap).first)
+        val otpSnap = youtubeSnap.copy(packageName = "com.example.auth", visibleText = listOf("Enter OTP sent to +92..."))
+        assertTrue(ScreenSafetyDetector.detectSecureScreen(otpSnap).first)
+    }
+
+    @Test
+    fun screenVisionAgentObservesActsVerifiesGuardsSensitiveAndLogsTextOnly() = runBlocking {
+        val stopCtrl = EmergencyStopController()
+        val vault = KeystoreSecretVault(context)
+        vault.saveSecret(AiBrainEngine.SLOT_GEMINI_PRIMARY, "AIzaSyScreenVisionTestKey123")
+
+        val receivedBodies = mutableListOf<String>()
+        var visionCallIdx = 0
+        val server = java.net.ServerSocket(0)
+        val port = server.localPort
+        val serverThread = Thread {
+            try {
+                while (!server.isClosed) {
+                    val sock = server.accept()
+                    val input = sock.getInputStream()
+                    val headerBuf = java.io.ByteArrayOutputStream()
+                    var p3 = 0; var p2 = 0; var p1 = 0
+                    while (true) {
+                        val b = input.read()
+                        if (b < 0) break
+                        headerBuf.write(b)
+                        if (p3 == '\r'.code && p2 == '\n'.code && p1 == '\r'.code && b == '\n'.code) break
+                        p3 = p2; p2 = p1; p1 = b
+                    }
+                    val headerText = headerBuf.toString(Charsets.UTF_8.name())
+                    val lines = headerText.split("\r\n")
+                    val path = lines.firstOrNull()?.split(" ")?.getOrElse(1) { "" }.orEmpty()
+                    val contentLen = lines.firstOrNull { it.startsWith("Content-Length:", true) }
+                        ?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
+                    val bodyStr = if (contentLen > 0) {
+                        val buf = ByteArray(contentLen)
+                        var r = 0
+                        while (r < contentLen) {
+                            val n = input.read(buf, r, contentLen - r)
+                            if (n <= 0) break
+                            r += n
+                        }
+                        String(buf, Charsets.UTF_8)
+                    } else ""
+                    if (bodyStr.isNotBlank()) receivedBodies.add(bodyStr)
+
+                    val jsonResp = when {
+                        path.startsWith("/v1beta/models?") -> """
+                            {
+                              "models": [
+                                {
+                                  "name": "models/gemini-3.8-flash",
+                                  "displayName": "Gemini 3.8 Flash",
+                                  "supportedGenerationMethods": ["generateContent"],
+                                  "inputTokenLimit": 1048576
+                                }
+                              ]
+                            }
+                        """.trimIndent()
+                        path.contains("gemini-3.8-flash:generateContent") -> {
+                            if (bodyStr.contains("Reply OK")) {
+                                """{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}"""
+                            } else if (bodyStr.contains("User ka sawal")) {
+                                """{"candidates":[{"content":{"parts":[{"text":"YouTube app khula hai aur Search button top-right par hai."}]}}]}"""
+                            } else {
+                                visionCallIdx++
+                                val actionJson = when (visionCallIdx) {
+                                    1 -> """{"understood":"YouTube home par hai","currentApp":"YouTube","action":"IN_APP_SEARCH","inputText":"Urdu naat","submitInput":true,"reason":"Urdu naat search karni hai"}"""
+                                    2 -> """{"understood":"Search results aa gaye hain","currentApp":"YouTube","action":"TAP","targetText":"Like","reason":"Pehli video like karni hai"}"""
+                                    3 -> """{"understood":"Video liked hai","currentApp":"YouTube","action":"DONE","reason":"Goal mukammal","whatWasDone":"Urdu naat search ki aur video like ki","whatWasNotDone":"Kuch nahi","finalDoneSummary":"Urdu naat search aur like mukammal."}"""
+                                    4 -> """{"understood":"WhatsApp chat khuli hai","currentApp":"WhatsApp","action":"TAP","targetText":"Send","isSensitiveAction":true,"sensitiveSummary":"WhatsApp par message 'Salam' send karna","reason":"Send tap"}"""
+                                    else -> """{"understood":"Popup atak gaya","currentApp":"SampleApp","action":"TAP","targetText":"MissingButton","reason":"Retry tap"}"""
+                                }
+                                """{"candidates":[{"content":{"parts":[{"text":${org.json.JSONObject.quote(actionJson)}}]}}]}"""
+                            }
+                        }
+                        else -> """{"error":{"code":404,"message":"Not found"}}"""
+                    }
+
+                    val respBytes = jsonResp.toByteArray(Charsets.UTF_8)
+                    val out = sock.getOutputStream()
+                    val statusLine = if (jsonResp.startsWith("{\"error\"")) "404 Not Found" else "200 OK"
+                    out.write(
+                        ("HTTP/1.1 $statusLine\r\nContent-Type: application/json\r\nContent-Length: ${respBytes.size}\r\nConnection: close\r\n\r\n")
+                            .toByteArray(Charsets.UTF_8)
+                    )
+                    out.write(respBytes)
+                    out.flush()
+                    sock.close()
+                }
+            } catch (_: Exception) {
+            }
+        }
+        serverThread.isDaemon = true
+        serverThread.start()
+
+        try {
+            val network = TeenaNetworkClients(db.geminiModelDao(), geminiBaseUrl = "http://127.0.0.1:$port", emergencyStopController = stopCtrl)
+            val aiBrain = AiBrainEngine(db, vault, network, OfflineCapabilitiesEngine(context), stopCtrl)
+            aiBrain.ensureDefaultProviderSlots()
+
+            var currentStepScreen = 0
+            var secureMode = false
+            var failAllTaps = false
+            val driverActions = mutableListOf<String>()
+            val createdBitmaps = mutableListOf<Bitmap>()
+
+            val fakeDriver = object : ScreenAutomationDriver {
+                override fun isAccessibilityReady(): Boolean = true
+                override fun isScreenshotSupported(): Pair<Boolean, String> = true to "OK"
+                override fun captureUiTree(): ScreenSnapshot {
+                    if (secureMode) {
+                        return ScreenSnapshot(
+                            packageName = "com.bank.secure",
+                            windowClass = "PinActivity",
+                            visibleText = listOf("Enter PIN"),
+                            nodes = listOf(UiNodeSummary("", "PIN", "pin", "EditText", true, true, false, Rect(0, 0, 100, 50), isPassword = true)),
+                            isSecureWindow = true,
+                            secureReason = "Password input field detected on screen"
+                        )
+                    }
+                    return when (currentStepScreen) {
+                        0 -> ScreenSnapshot("com.google.android.youtube", "Home", listOf("Search YouTube", "Trending"), emptyList())
+                        1 -> ScreenSnapshot("com.google.android.youtube", "Results", listOf("Urdu naat", "Like"), emptyList())
+                        else -> ScreenSnapshot("com.google.android.youtube", "Player", listOf("Liked", "Share"), emptyList())
+                    }
+                }
+                override suspend fun captureScreenshotBitmap(): Result<Bitmap> {
+                    if (secureMode) return Result.failure(SecureScreenException("FLAG_SECURE"))
+                    val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+                    createdBitmaps.add(bmp)
+                    return Result.success(bmp)
+                }
+                override suspend fun waitForStability(): ScreenSnapshot? = captureUiTree()
+                override suspend fun tap(viewId: String, textOrDesc: String, bounds: Rect?, x: Float?, y: Float?): AutomationResult {
+                    driverActions.add("TAP:$textOrDesc")
+                    if (failAllTaps) return AutomationResult(false, false, "TAP($textOrDesc)", "Button not found")
+                    currentStepScreen = 2
+                    return AutomationResult(true, true, "TAP($textOrDesc)", "Tapped and screen changed")
+                }
+                override suspend fun longPress(viewId: String, textOrDesc: String, x: Float?, y: Float?): AutomationResult =
+                    AutomationResult(true, true, "LONG_PRESS", "OK")
+                override suspend fun swipe(direction: String): AutomationResult =
+                    AutomationResult(true, true, "SWIPE", "OK")
+                override suspend fun scroll(forward: Boolean): AutomationResult =
+                    AutomationResult(true, true, "SCROLL", "OK")
+                override suspend fun typeText(text: String, viewId: String, targetHint: String, x: Float?, y: Float?, submit: Boolean): AutomationResult =
+                    AutomationResult(true, true, "TYPE", "OK")
+                override suspend fun inAppSearch(query: String): AutomationResult {
+                    driverActions.add("SEARCH:$query")
+                    currentStepScreen = 1
+                    return AutomationResult(true, true, "IN_APP_SEARCH($query)", "Searched")
+                }
+                override suspend fun goBack(): AutomationResult = AutomationResult(true, true, "BACK", "OK")
+                override suspend fun goHome(): AutomationResult = AutomationResult(true, true, "HOME", "OK")
+                override suspend fun openApp(appNameOrPkg: String): AutomationResult = AutomationResult(true, true, "OPEN_APP", "OK")
+            }
+
+            val agent = ScreenVisionAgentEngine(context, db, aiBrain, stopCtrl, fakeDriver)
+
+            // 1. DEKHNA: Describe current screen -> screenshot + <untrusted_data> sent to Gemini Vision, bitmap recycled in RAM
+            val descOut = agent.describeCurrentScreen("Screen par kya hai?").getOrThrow()
+            assertTrue(descOut.text.contains("YouTube"))
+            assertEquals("gemini-3.8-flash", descOut.modelUsed)
+            assertTrue(createdBitmaps.all { it.isRecycled })
+            assertTrue(receivedBodies.any { it.contains("<untrusted_data") && it.contains("inlineData") })
+
+            // 2. SOCHNA + ACT + VERIFY: 2-action goal completes cleanly
+            val goalReport = agent.executeGoalLoop("YouTube par Urdu naat search karo aur video like karo").getOrThrow()
+            assertTrue(goalReport.completed)
+            assertFalse(goalReport.blocked)
+            assertEquals(2, goalReport.stepsExecuted)
+            assertEquals(listOf("SEARCH:Urdu naat", "TAP:Like"), driverActions)
+            assertTrue(createdBitmaps.all { it.isRecycled })
+
+            // 3. SENSITIVE CONFIRMATION GATE: Declining stops before executing action
+            val confirmDeclinedJob = launch {
+                var waited = 0
+                while (agent.pendingActionConfirmation.value == null && waited < 40) {
+                    delay(50)
+                    waited++
+                }
+                agent.pendingActionConfirmation.value?.respond(false)
+            }
+            val sensitiveReport = agent.executeGoalLoop("WhatsApp par Salam send karo").getOrThrow()
+            confirmDeclinedJob.join()
+            assertFalse(sensitiveReport.completed)
+            assertTrue(sensitiveReport.blocked)
+            assertTrue(sensitiveReport.stuckReason.contains("confirm", ignoreCase = true))
+
+            // 4. 3 CONSECUTIVE FAILURES: stops honestly and reports kahan atki
+            failAllTaps = true
+            val stuckReport = agent.executeGoalLoop("Missing button tap karo").getOrThrow()
+            assertFalse(stuckReport.completed)
+            assertTrue(stuckReport.stuckReason.contains("3 koshishon", ignoreCase = true))
+
+            // 5. SECURE SCREEN: blocks immediately without sending any screenshot to Gemini
+            val callsBeforeSecure = receivedBodies.size
+            secureMode = true
+            val secureGoal = agent.executeGoalLoop("PIN screen par tap karo").getOrThrow()
+            assertTrue(secureGoal.blocked)
+            assertTrue(secureGoal.stuckReason.contains("Secure screen", ignoreCase = true))
+            assertEquals(callsBeforeSecure, receivedBodies.size)
+
+            // 6. Room text logs persisted with screenshotTimestamp & NO image bytes
+            val persistedLogs = db.screenAutomationLogDao().getAllLogsOnce()
+            assertTrue(persistedLogs.isNotEmpty())
+            assertTrue(persistedLogs.all { it.screenshotTimestamp > 0L })
+
+            // 7. Emergency Stop halts screen description & agent loop
+            stopCtrl.triggerEmergencyStop()
+            assertTrue(agent.describeCurrentScreen("Test").isFailure)
+            assertTrue(agent.executeGoalLoop("Test goal").isFailure)
+        } finally {
+            server.close()
+            vault.deleteSecret(AiBrainEngine.SLOT_GEMINI_PRIMARY)
+        }
     }
 }

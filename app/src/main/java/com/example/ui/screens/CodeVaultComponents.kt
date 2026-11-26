@@ -7,7 +7,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
@@ -41,9 +42,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.ai.ParsedCapabilityBrief
 import com.example.core.security.RepoRiskLevel
 import com.example.core.security.RepoRiskReport
+import com.example.data.local.CapabilitySummaryEntity
 import com.example.data.local.CodeVaultEntryEntity
 import com.example.data.remote.GitHubRepoDetail
 import com.example.ui.theme.NeuralCyan
@@ -53,9 +57,112 @@ import com.example.ui.theme.StatusCrimson
 import com.example.ui.viewmodel.VaultInspectUiState
 
 @Composable
+fun CapabilityBriefBlock(
+    summary: CapabilitySummaryEntity? = null,
+    parsedBrief: ParsedCapabilityBrief? = null
+) {
+    val status = summary?.status ?: parsedBrief?.status ?: "PENDING"
+    val kya = summary?.kyaKartaHai ?: parsedBrief?.kyaKartaHai
+    val addHoga = summary?.teenaMeinKyaAddHoga ?: parsedBrief?.teenaMeinKyaAddHoga
+    val zaroori = summary?.zarooriCheezein ?: parsedBrief?.zarooriCheezein
+    val hadd = summary?.haddAurKhatre ?: parsedBrief?.haddAurKhatre
+    val modelUsed = summary?.modelUsed ?: parsedBrief?.modelUsed.orEmpty()
+    val errorMsg = summary?.errorMessage ?: parsedBrief?.errorMessage.orEmpty()
+
+    val boxColor = when (status) {
+        "READY" -> NeuralCyan.copy(alpha = 0.12f)
+        "FAILED" -> StatusCrimson.copy(alpha = 0.12f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    }
+
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = boxColor,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = "Ye Kya Kar Sakta Hai",
+                        tint = if (status == "FAILED") StatusCrimson else NeuralCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Ye Kya Kar Sakta Hai",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (status == "FAILED") StatusCrimson else NeuralCyan
+                    )
+                }
+                StatusPill(if (status == "READY") "AI READY" else status)
+            }
+
+            if (kya.isNullOrBlank() && addHoga.isNullOrBlank()) {
+                Text(
+                    text = "Asli repo/model content parh kar AI brief abhi tayyar nahi hua — 'Inspect' dabayein (andaza nahi lagaya jata).",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                BriefLine("Kya karta hai:", kya.orEmpty())
+                BriefLine("Teena mein kya add hoga:", addHoga.orEmpty())
+                BriefLine("Zaroori cheezein:", zaroori.orEmpty())
+                BriefLine("Hadd aur khatre:", hadd.orEmpty())
+                if (modelUsed.isNotBlank()) {
+                    Text(
+                        text = "AI Model: $modelUsed",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NeuralMint
+                    )
+                }
+                if (status == "FAILED" && errorMsg.isNotBlank()) {
+                    Text(
+                        text = "Asli Error: $errorMsg",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StatusCrimson
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BriefLine(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = NeuralMint
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 fun GitHubRepoRiskCard(
     repo: GitHubRepoDetail,
     report: RepoRiskReport?,
+    summary: CapabilitySummaryEntity?,
     isBusy: Boolean,
     onInspectCode: () -> Unit,
     onSaveToVault: () -> Unit,
@@ -95,6 +202,9 @@ fun GitHubRepoRiskCard(
         }
 
         Text(repo.description, style = MaterialTheme.typography.bodySmall)
+
+        // 4-part Roman Urdu "Ye Kya Kar Sakta Hai" generated from real files via Chat AI
+        CapabilityBriefBlock(summary = summary)
 
         // Honest Code Review Status + Roman Urdu Risk Banner
         if (activeReport == null || !activeReport.codeReviewed) {
@@ -202,28 +312,56 @@ fun GitHubRepoRiskCard(
             )
         }
 
-        // Action row: Khatarnaak blocks Vault & hides/disables Propose!
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        // Responsive non-wrapping FlowRow for action buttons (drops cleanly to next row on narrow phones)
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
             FilledTonalButton(
                 onClick = onInspectCode,
                 enabled = !isBusy,
-                modifier = Modifier.testTag("inspect_repo_btn_${repo.fullName}")
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 96.dp, minHeight = 48.dp)
+                    .testTag("inspect_repo_btn_${repo.fullName}")
             ) {
-                Text(if (activeReport?.codeReviewed == true) "Re-Inspect Code" else "Inspect Real Code")
+                Text(
+                    text = if (activeReport?.codeReviewed == true) "Re-Inspect" else "Inspect Code",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
 
             if (activeReport != null && activeReport.codeReviewed && activeReport.riskLevel != RepoRiskLevel.KHATARNAAK) {
                 Button(
                     onClick = onSaveToVault,
                     enabled = !isBusy && activeReport.vaultSaveAllowed,
-                    modifier = Modifier.testTag("save_vault_btn_${repo.fullName}")
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 96.dp, minHeight = 48.dp)
+                        .testTag("save_vault_btn_${repo.fullName}")
                 ) {
-                    Text("Save Vault")
+                    Text("Save Vault", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
 
-            OutlinedButton(onClick = onOpenUrl) {
-                Text("Open")
+            OutlinedButton(
+                onClick = onOpenUrl,
+                modifier = Modifier.defaultMinSize(minWidth = 84.dp, minHeight = 48.dp)
+            ) {
+                Text("Open", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+
+            if (activeReport != null && activeReport.codeReviewed && activeReport.riskLevel != RepoRiskLevel.KHATARNAAK && activeReport.proposeAllowed) {
+                OutlinedButton(
+                    onClick = onProposeTool,
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 110.dp, minHeight = 48.dp)
+                        .testTag("propose_tool_btn_${repo.fullName}")
+                ) {
+                    Text("Propose Tool", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
 
@@ -235,15 +373,7 @@ fun GitHubRepoRiskCard(
                     color = StatusCrimson,
                     fontWeight = FontWeight.Bold
                 )
-            } else if (activeReport.proposeAllowed) {
-                OutlinedButton(
-                    onClick = onProposeTool,
-                    enabled = !isBusy,
-                    modifier = Modifier.testTag("propose_tool_btn_${repo.fullName}")
-                ) {
-                    Text("Propose New Kotlin Tool (Vault Untouched)")
-                }
-            } else {
+            } else if (!activeReport.proposeAllowed) {
                 Text(
                     text = "Propose band hai: license (${activeReport.licenseSpdx}) allow nahi karta.",
                     style = MaterialTheme.typography.labelSmall,
@@ -342,7 +472,13 @@ fun OriginalCodeVaultTab(
                                     onClick = { onSelectFile(path) },
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                                 ) {
-                                    Text(shortLabel.take(28), style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        shortLabel.take(28),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
                         }
@@ -372,8 +508,11 @@ fun OriginalCodeVaultTab(
                         }
                     }
 
-                    OutlinedButton(onClick = onCloseInspect) {
-                        Text("Close Viewer")
+                    OutlinedButton(
+                        onClick = onCloseInspect,
+                        modifier = Modifier.defaultMinSize(minWidth = 100.dp, minHeight = 48.dp)
+                    ) {
+                        Text("Close Viewer", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -383,7 +522,7 @@ fun OriginalCodeVaultTab(
             item {
                 NeuralCard {
                     Text(
-                        "Abhi Vault khaali hai. GitHub tab mein repo search karein -> 'Inspect Real Code' chalayein -> Safe/Ehtiyat verified repo ko 'Save Vault' se mehfooz karein.",
+                        "Abhi Vault khaali hai. GitHub tab mein repo search karein -> 'Inspect Code' chalayein -> Safe/Ehtiyat verified repo ko 'Save Vault' se mehfooz karein.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -439,17 +578,31 @@ fun OriginalCodeVaultTab(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Button(
                             onClick = { onOpenAndVerify(entry.vaultId) },
                             enabled = !isBusy,
                             colors = if (isFailed) ButtonDefaults.buttonColors(containerColor = StatusCrimson) else ButtonDefaults.buttonColors(),
-                            modifier = Modifier.testTag("verify_open_vault_${entry.vaultId}")
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 116.dp, minHeight = 48.dp)
+                                .testTag("verify_open_vault_${entry.vaultId}")
                         ) {
-                            Text("Open & Verify SHA-256")
+                            Text("Open & Verify", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                         }
-                        FilledTonalButton(onClick = { showAttribution = !showAttribution }) {
-                            Text(if (showAttribution) "Hide License" else "License & Metadata")
+                        FilledTonalButton(
+                            onClick = { showAttribution = !showAttribution },
+                            modifier = Modifier.defaultMinSize(minWidth = 110.dp, minHeight = 48.dp)
+                        ) {
+                            Text(
+                                text = if (showAttribution) "Hide License" else "License Info",
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
 

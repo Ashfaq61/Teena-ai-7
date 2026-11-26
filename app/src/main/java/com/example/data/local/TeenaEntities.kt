@@ -183,6 +183,26 @@ data class MarketplaceToolEntity(
     val deviceVerified: Boolean = false,
     val branchName: String = "",
     val releaseUrl: String = "",
+    val capabilitySummaryJson: String = "",
+    val autoActivated: Boolean = false,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "capability_summaries")
+data class CapabilitySummaryEntity(
+    @PrimaryKey val itemKey: String, // e.g. "github:owner/repo" or "hf:modelId"
+    val sourceType: String, // "GITHUB" or "HUGGINGFACE"
+    val title: String,
+    val sourceUrl: String,
+    val commitOrRevision: String = "",
+    val kyaKartaHai: String,
+    val teenaMeinKyaAddHoga: String,
+    val zarooriCheezein: String,
+    val haddAurKhatre: String,
+    val modelUsed: String = "",
+    val status: String = "READY", // READY, FAILED, NOT_DONE
+    val errorMessage: String = "",
+    val sourceFilesSampled: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -285,3 +305,34 @@ data class CodeVaultEntryEntity(
     val downloadedAtIso: String,
     val downloadedAtMillis: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "screen_automation_logs")
+data class ScreenAutomationLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sessionId: String,
+    val stepNumber: Int,
+    val screenshotTimestamp: Long,
+    val packageName: String,
+    val understoodSummary: String,
+    val actionTaken: String,
+    val verificationResult: String, // VERIFIED, FAILED, BLOCKED, SENSITIVE_PENDING, DONE, PARTIAL
+    val details: String,
+    val modelUsed: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "triggers")
+data class TriggerEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val triggerType: String = "ONE_TIME", // ONE_TIME, DAILY, INTERVAL, BOOT
+    val actionType: String = "NOTIFY", // NOTIFY, SPEAK_ALERT, VOICE_PROMPT, AI_CHECK
+    val actionPayload: String = "",
+    val triggerAtMillis: Long = System.currentTimeMillis(),
+    val intervalMinutes: Int = 60,
+    val enabled: Boolean = true,
+    val lastFiredAtMillis: Long = 0L,
+    val lastResult: String = "Scheduled",
+    val createdAt: Long = System.currentTimeMillis()
+)
+

@@ -9,6 +9,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -21,12 +22,17 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import android.os.Build
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,6 +40,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Call
@@ -51,15 +58,18 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -72,32 +82,52 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.example.data.local.FeatureStatus
 import com.example.system.CameraVideoTarget
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.SocialTaskControl
+import com.example.ai.SocialTaskKind
+import com.example.ai.SocialTaskStatus
 import com.example.system.SocialPlatform
 import com.example.system.TeenaAccessibilityService
+import com.example.system.TeenaFaceDetectionEngine
+import com.example.system.TransientFaceDetectionState
+import com.example.ui.components.FaceDetectionOverlay
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
+import com.example.ui.theme.StatusAmber
+import com.example.ui.theme.StatusCrimson
 import com.example.ui.viewmodel.TeenaViewModel
+import java.util.concurrent.Executors
 
 @Composable
 fun AutomationAndDeviceScreen(
     viewModel: TeenaViewModel,
-    onNavigateToChat: () -> Unit
+    onNavigateToChat: () -> Unit,
+    onOpenMaps: () -> Unit = {}
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
+    val requestedTab by viewModel.requestedAutomationTab.collectAsStateWithLifecycle()
+    var selectedTab by remember { mutableIntStateOf(requestedTab) }
+    LaunchedEffect(requestedTab) {
+        selectedTab = requestedTab
+    }
     val tabs = listOf("Screen UI", "Social (6)", "Phone & Maps", "Camera & Media")
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -105,7 +135,11 @@ fun AutomationAndDeviceScreen(
             tabs.forEachIndexed { idx, title ->
                 Tab(
                     selected = selectedTab == idx,
-                    onClick = { selectedTab = idx },
+                    onClick = {
+                        selectedTab = idx
+                        viewModel.setAutomationTab(idx)
+                    },
+                    modifier = Modifier.testTag("automation_tab_$idx"),
                     text = { Text(title, maxLines = 1, style = MaterialTheme.typography.labelLarge) }
                 )
             }
@@ -114,57 +148,282 @@ fun AutomationAndDeviceScreen(
         when (selectedTab) {
             0 -> AccessibilityTab(viewModel)
             1 -> SocialAutomationTab(viewModel)
-            2 -> PhoneAndMapsTab(viewModel)
+            2 -> PhoneAndMapsTab(viewModel, onOpenMaps)
             3 -> CameraAndMediaTab(viewModel, onNavigateToChat)
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccessibilityTab(viewModel: TeenaViewModel) {
     val context = LocalContext.current
     val isBound by viewModel.accessibilityConnected.collectAsStateWithLifecycle()
     val snapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
     val logs by viewModel.automationLog.collectAsStateWithLifecycle()
+    val screenLogs by viewModel.screenAutomationLogs.collectAsStateWithLifecycle()
+    val screenWatchState by viewModel.screenWatchState.collectAsStateWithLifecycle()
+    val pendingScreenConfirm by viewModel.pendingScreenConfirmation.collectAsStateWithLifecycle()
+    val screenVisionAnswer by viewModel.screenVisionAnswer.collectAsStateWithLifecycle()
+    val screenGoalResult by viewModel.screenGoalResult.collectAsStateWithLifecycle()
+    val providerSlots by viewModel.providerSlots.collectAsStateWithLifecycle()
 
+    val hasGeminiKey by produceState(initialValue = false, providerSlots) {
+        value = viewModel.container.aiBrain.hasPrimaryGeminiApiKey()
+    }
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val isScreenshotApiSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    val blockedReasons = buildList {
+        if (!settings.directAccessibilityAgentEnabled) add("Direct Accessibility Agent Settings mein OFF hai")
+        if (!isBound) add("Teena AccessibilityService Android Settings mein enable nahi hai")
+        if (!isScreenshotApiSupported) add("Screen screenshot (takeScreenshot) ke liye Android 11+ (API 30) zaroori hai")
+        if (!hasGeminiKey) add("Gemini API key missing (API Manager mein configure karein)")
+    }
+    val honestStatus = when {
+        blockedReasons.isNotEmpty() -> FeatureStatus.BLOCKED.name
+        TeenaAccessibilityService.runtimeVerifiedOnDevice -> FeatureStatus.ACTIVE.name
+        else -> FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name
+    }
+
+    var visionQuestion by remember { mutableStateOf("Screen par kya hai aur kaun sa app khula hai?") }
+    var agentGoal by remember { mutableStateOf("") }
     var tapTarget by remember { mutableStateOf("") }
     var typePayload by remember { mutableStateOf("") }
+    val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("screen_automation_list"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             NeuralCard {
                 SectionHeader(
-                    title = "Android Accessibility Automation",
-                    subtitle = "Inspect live UI trees and execute verified actions",
-                    trailing = { StatusPill(if (isBound) "ACTIVE" else "BLOCKED") }
+                    title = "Android Screen Vision & Automation",
+                    subtitle = "Gemini Vision + Accessibility UI tree (Screenshot strictly RAM-only)",
+                    trailing = {
+                        StatusPill(
+                            status = honestStatus,
+                            modifier = Modifier.testTag("screen_automation_status_pill")
+                        )
+                    }
                 )
-                if (!isBound) {
+                if (blockedReasons.isNotEmpty()) {
                     Text(
-                        "TeenaAccessibilityService is currently disabled in Android Settings. Enable it to inspect active windows and verify gestures.",
-                        style = MaterialTheme.typography.bodySmall
+                        text = "BLOCKED: ${blockedReasons.joinToString("; ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StatusCrimson,
+                        modifier = Modifier.testTag("screen_blocked_reason_text")
                     )
+                } else if (!TeenaAccessibilityService.runtimeVerifiedOnDevice) {
+                    Text(
+                        text = "IMPLEMENTED NOT DEVICE-VERIFIED: Accessibility bound hai aur Gemini key mojood hai; pehla asli screen action ya vision call chalne par ACTIVE hoga.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StatusAmber
+                    )
+                }
+
+                if (!isBound) {
                     Button(
                         onClick = { TeenaAccessibilityService.openAccessibilitySettings(context) },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("enable_accessibility_btn")
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("enable_accessibility_btn")
                     ) {
-                        Text("Open Accessibility Settings")
+                        Text("Open Accessibility Settings", maxLines = 1, softWrap = false)
                     }
                 } else {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { viewModel.refreshScreenSnapshot() }) {
-                            Text("Capture Screen Tree")
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.refreshScreenSnapshot() },
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            Text("Capture Screen Tree", maxLines = 1, softWrap = false)
                         }
-                        OutlinedButton(onClick = { viewModel.runAccessibilityAction { it.goBackVerified() } }) {
-                            Text("Back")
+                        OutlinedButton(
+                            onClick = { viewModel.runAccessibilityAction { it.goBackVerified() } },
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            Text("Back", maxLines = 1, softWrap = false)
                         }
-                        OutlinedButton(onClick = { viewModel.runAccessibilityAction { it.goHomeVerified() } }) {
-                            Text("Home")
+                        OutlinedButton(
+                            onClick = { viewModel.runAccessibilityAction { it.goHomeVerified() } },
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            Text("Home", maxLines = 1, softWrap = false)
                         }
                     }
+                }
+            }
+        }
+
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Screen Vision (Dekho aur Batao)",
+                    subtitle = "Screenshot + UI tree sirf Gemini Vision model ko bhejta hai",
+                    trailing = if (screenWatchState.isWatching) {
+                        { StatusPill("RUNNING") }
+                    } else null
+                )
+                OutlinedTextField(
+                    value = visionQuestion,
+                    onValueChange = { visionQuestion = it },
+                    label = { Text("Screen ke bare mein sawal poochein") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("screen_question_input")
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(
+                        "Screen par kya hai?",
+                        "Ye button kya karta hai?",
+                        "Kaun sa app khula hai?"
+                    ).forEach { preset ->
+                        FilterChip(
+                            selected = visionQuestion == preset,
+                            onClick = { visionQuestion = preset },
+                            label = { Text(preset, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+                Button(
+                    onClick = { viewModel.describeScreenWithVision(visionQuestion) },
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .testTag("screen_describe_btn")
+                ) {
+                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text("Dekho aur Batao", maxLines = 1, softWrap = false)
+                }
+                if (screenVisionAnswer.isNotBlank()) {
+                    Text(
+                        text = screenVisionAnswer,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(10.dp)
+                    )
+                }
+            }
+        }
+
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Autonomous Screen Agent",
+                    subtitle = "Observe → Think → Act → Verify (Max 25 steps, 3 min, Secure Guard)",
+                    trailing = {
+                        if (screenWatchState.isWatching) {
+                            StatusPill("THINKING")
+                        }
+                    }
+                )
+                if (screenWatchState.isWatching) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(StatusAmber.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Visibility, contentDescription = null, tint = StatusAmber, modifier = Modifier.size(18.dp))
+                        Text(
+                            text = "Teena screen dekh rahi hai • Step ${screenWatchState.stepNumber}/${screenWatchState.maxSteps}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = StatusAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = agentGoal,
+                    onValueChange = { agentGoal = it },
+                    label = { Text("Goal (e.g. YouTube par Urdu naat search karo)") },
+                    minLines = 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("screen_goal_input")
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.runScreenAgentGoal(agentGoal) },
+                        enabled = agentGoal.isNotBlank(),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("screen_goal_run_btn")
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text("Goal Chalao", maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.stopScreenAgentGoal() },
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("screen_goal_stop_btn")
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text("Stop", maxLines = 1, softWrap = false)
+                    }
+                }
+                pendingScreenConfirm?.let { pending ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(StatusAmber.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(pending.title, style = MaterialTheme.typography.labelLarge, color = StatusAmber)
+                        Text(pending.exactActionDescription, style = MaterialTheme.typography.bodySmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { viewModel.respondToPendingScreenConfirmation(true) },
+                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            ) {
+                                Text("Authorize", maxLines = 1, softWrap = false)
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.respondToPendingScreenConfirmation(false) },
+                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            ) {
+                                Text("Cancel", maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                if (screenGoalResult.isNotBlank()) {
+                    Text(
+                        text = screenGoalResult,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(10.dp)
+                            .testTag("screen_goal_output_text")
+                    )
                 }
             }
         }
@@ -178,15 +437,20 @@ private fun AccessibilityTab(viewModel: TeenaViewModel) {
                     label = { Text("Button text or label to tap / long-press") },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     FilledTonalButton(
                         onClick = { viewModel.runAccessibilityAction { it.tapByTextOrDesc(tapTarget) } },
-                        enabled = tapTarget.isNotBlank()
-                    ) { Text("Tap") }
+                        enabled = tapTarget.isNotBlank(),
+                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    ) { Text("Tap", maxLines = 1, softWrap = false) }
                     FilledTonalButton(
                         onClick = { viewModel.runAccessibilityAction { it.longPressByText(tapTarget) } },
-                        enabled = tapTarget.isNotBlank()
-                    ) { Text("Long Press") }
+                        enabled = tapTarget.isNotBlank(),
+                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    ) { Text("Long Press", maxLines = 1, softWrap = false) }
                 }
                 OutlinedTextField(
                     value = typePayload,
@@ -196,15 +460,18 @@ private fun AccessibilityTab(viewModel: TeenaViewModel) {
                 )
                 Button(
                     onClick = { viewModel.runAccessibilityAction { it.typeIntoFocusedOrEditable(typePayload) } },
-                    enabled = typePayload.isNotBlank()
-                ) { Text("Type & Verify") }
+                    enabled = typePayload.isNotBlank(),
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                ) { Text("Type & Verify", maxLines = 1, softWrap = false) }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("UP", "DOWN", "LEFT", "RIGHT").forEach { dir ->
                         OutlinedButton(
                             onClick = { viewModel.runAccessibilityAction { it.swipeDirection(dir) } },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(dir) }
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) { Text(dir, maxLines = 1, softWrap = false) }
                     }
                 }
             }
@@ -225,6 +492,61 @@ private fun AccessibilityTab(viewModel: TeenaViewModel) {
             }
         }
 
+        item {
+            SectionHeader(
+                title = "Screen Step Log (Text Only — No Screenshots Saved)",
+                subtitle = "Sirf step timestamp, package, samajh, action aur verification save hota hai",
+                trailing = if (screenLogs.isNotEmpty()) {
+                    {
+                        OutlinedButton(
+                            onClick = { viewModel.clearScreenAutomationLogs() },
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            Text("Clear", maxLines = 1, softWrap = false)
+                        }
+                    }
+                } else null
+            )
+            if (screenLogs.isEmpty()) {
+                NeuralCard {
+                    Text(
+                        "Abhi tak koi Screen Vision ya Screen Agent step log nahi hua.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+
+        items(screenLogs, key = { "slog_${it.id}" }) { entry ->
+            NeuralCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Step #${entry.stepNumber} • ${entry.actionTaken}",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatusPill(entry.verificationResult)
+                }
+                Text(
+                    "${timeFormatter.format(Date(entry.screenshotTimestamp))} • ${entry.packageName.ifBlank { "system" }}${if (entry.modelUsed.isNotBlank()) " • ${entry.modelUsed}" else ""}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NeuralCyan
+                )
+                Text("Samajh: ${entry.understoodSummary}", style = MaterialTheme.typography.bodySmall)
+                if (entry.details.isNotBlank()) {
+                    Text(
+                        entry.details,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         items(logs) { res ->
             NeuralCard {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -237,21 +559,239 @@ private fun AccessibilityTab(viewModel: TeenaViewModel) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SocialAutomationTab(viewModel: TeenaViewModel) {
     val installedApps = remember { viewModel.container.socialEngine.checkInstalledApps() }
-    var selectedPlatform by remember { mutableStateOf(SocialPlatform.WHATSAPP) }
+    val taskState by viewModel.socialTaskState.collectAsStateWithLifecycle()
+    var selectedPlatform by remember { mutableStateOf(SocialPlatform.INSTAGRAM) }
+    var selectedTaskKind by remember { mutableStateOf(SocialTaskKind.CREATE_POST) }
     var searchQuery by remember { mutableStateOf("") }
     var draftText by remember { mutableStateOf("") }
     var phoneTarget by remember { mutableStateOf("") }
+    var manualStepFirst by remember { mutableStateOf(false) }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("social_automation_list"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            SectionHeader("Supported Social Workflows", "Launch, search, and prepare user-authorized drafts")
+            NeuralCard {
+                SectionHeader(
+                    title = "Social & WhatsApp Task State Machine",
+                    subtitle = "Safety Lock: Hamesha CONFIRM ke baad hi send/post hoga — kabhi silent auto-submit nahi",
+                    trailing = {
+                        StatusPill(
+                            status = taskState.status.name,
+                            modifier = Modifier.testTag("social_task_status_pill")
+                        )
+                    }
+                )
+                Text(
+                    text = "Active: ${taskState.platform.displayName} • ${taskState.taskKind.displayLabel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = NeuralCyan
+                )
+                Text(
+                    text = taskState.statusMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("social_task_status_message")
+                )
+                if (taskState.confirmationPrompt.isNotBlank() &&
+                    taskState.status == SocialTaskStatus.WAITING_FOR_CONFIRMATION
+                ) {
+                    Text(
+                        text = "Confirm Action: ${taskState.confirmationPrompt}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StatusAmber,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(StatusAmber.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    )
+                }
+                if (taskState.resolvedContactInfo.isNotBlank()) {
+                    Text(
+                        text = taskState.resolvedContactInfo,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NeuralMint
+                    )
+                }
+                if (taskState.errorMessage.isNotBlank()) {
+                    Text(
+                        text = taskState.errorMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StatusCrimson
+                    )
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.controlSocialTask(SocialTaskControl.CONFIRM) },
+                        enabled = taskState.status == SocialTaskStatus.WAITING_FOR_CONFIRMATION,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_task_confirm_btn")
+                    ) {
+                        Text("CONFIRM", maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.controlSocialTask(SocialTaskControl.REJECT) },
+                        enabled = taskState.status == SocialTaskStatus.WAITING_FOR_CONFIRMATION ||
+                            taskState.status == SocialTaskStatus.WAITING_FOR_USER ||
+                            taskState.status == SocialTaskStatus.RUNNING,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_task_reject_btn")
+                    ) {
+                        Text("REJECT", maxLines = 1, softWrap = false)
+                    }
+                    FilledTonalButton(
+                        onClick = { viewModel.controlSocialTask(SocialTaskControl.RESUME) },
+                        enabled = taskState.status == SocialTaskStatus.WAITING_FOR_USER,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_task_resume_btn")
+                    ) {
+                        Text("RESUME", maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.resetSocialTask() },
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_task_reset_btn")
+                    ) {
+                        Text("Reset", maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+        }
+
+        item {
+            NeuralCard {
+                SectionHeader("Stage Social Post / Reel / Story or WhatsApp Task")
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SocialTaskKind.entries.forEach { kind ->
+                        FilterChip(
+                            selected = selectedTaskKind == kind,
+                            onClick = {
+                                selectedTaskKind = kind
+                                if (kind == SocialTaskKind.WHATSAPP_MESSAGE) {
+                                    selectedPlatform = SocialPlatform.WHATSAPP
+                                } else if (selectedPlatform == SocialPlatform.WHATSAPP) {
+                                    selectedPlatform = SocialPlatform.INSTAGRAM
+                                }
+                            },
+                            modifier = Modifier.testTag("social_kind_${kind.name.lowercase()}"),
+                            label = { Text(kind.displayLabel, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+
+                if (selectedTaskKind != SocialTaskKind.WHATSAPP_MESSAGE) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            SocialPlatform.INSTAGRAM,
+                            SocialPlatform.FACEBOOK,
+                            SocialPlatform.TIKTOK,
+                            SocialPlatform.YOUTUBE,
+                            SocialPlatform.TELEGRAM
+                        ).forEach { plat ->
+                            FilterChip(
+                                selected = selectedPlatform == plat,
+                                onClick = { selectedPlatform = plat },
+                                label = { Text(plat.displayName, maxLines = 1, softWrap = false) }
+                            )
+                        }
+                    }
+                    FilterChip(
+                        selected = manualStepFirst,
+                        onClick = { manualStepFirst = !manualStepFirst },
+                        label = { Text("Wait for manual media pick first (WAITING_FOR_USER)", maxLines = 1) }
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = phoneTarget,
+                        onValueChange = { phoneTarget = it },
+                        label = { Text("WhatsApp Contact / Relation (ammi, bhai) or Phone") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("whatsapp_task_contact_input")
+                    )
+                }
+
+                OutlinedTextField(
+                    value = draftText,
+                    onValueChange = { draftText = it },
+                    label = {
+                        Text(
+                            if (selectedTaskKind == SocialTaskKind.WHATSAPP_MESSAGE) "WhatsApp message text"
+                            else "Post / Reel / Story caption"
+                        )
+                    },
+                    minLines = 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("social_task_text_input")
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            if (selectedTaskKind == SocialTaskKind.WHATSAPP_MESSAGE) {
+                                viewModel.startWhatsAppTask(phoneTarget, draftText)
+                            } else {
+                                viewModel.startSocialTask(
+                                    platform = selectedPlatform,
+                                    taskKind = selectedTaskKind,
+                                    caption = draftText,
+                                    requireManualUserPrep = manualStepFirst
+                                )
+                            }
+                        },
+                        enabled = draftText.isNotBlank(),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_stage_task_btn")
+                    ) {
+                        Text(
+                            if (selectedTaskKind == SocialTaskKind.WHATSAPP_MESSAGE) "Stage WhatsApp Task"
+                            else "Stage ${selectedTaskKind.displayLabel}",
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.requestAuthorizedSocialSend(selectedPlatform, draftText, phoneTarget) },
+                        enabled = draftText.isNotBlank(),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("social_authorize_send_btn")
+                    ) {
+                        Text("Quick Composer Dialog", maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionHeader("Supported Social Platforms", "Launch, search, and open authorized composers")
         }
 
         items(installedApps) { status ->
@@ -271,10 +811,13 @@ private fun SocialAutomationTab(viewModel: TeenaViewModel) {
                     }
                     StatusPill(if (status.installed) "ACTIVE" else "PARTIAL")
                     Spacer(Modifier.size(8.dp))
-                    FilledTonalButton(onClick = {
-                        selectedPlatform = status.platform
-                        viewModel.container.socialEngine.openPlatform(status.platform)
-                    }) {
+                    FilledTonalButton(
+                        onClick = {
+                            selectedPlatform = status.platform
+                            viewModel.container.socialEngine.openPlatform(status.platform)
+                        },
+                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    ) {
                         Text("Open")
                     }
                 }
@@ -283,7 +826,7 @@ private fun SocialAutomationTab(viewModel: TeenaViewModel) {
 
         item {
             NeuralCard {
-                SectionHeader("Authorized Content Search & Post Composer (${selectedPlatform.displayName})")
+                SectionHeader("Search on ${selectedPlatform.displayName}")
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
@@ -292,43 +835,25 @@ private fun SocialAutomationTab(viewModel: TeenaViewModel) {
                 )
                 Button(
                     onClick = { viewModel.container.socialEngine.searchPlatformContent(selectedPlatform, searchQuery) },
-                    enabled = searchQuery.isNotBlank()
+                    enabled = searchQuery.isNotBlank(),
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                 ) { Text("Search in ${selectedPlatform.displayName}") }
-
-                if (selectedPlatform == SocialPlatform.WHATSAPP) {
-                    OutlinedTextField(
-                        value = phoneTarget,
-                        onValueChange = { phoneTarget = it },
-                        label = { Text("Optional WhatsApp phone (with country code)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                OutlinedTextField(
-                    value = draftText,
-                    onValueChange = { draftText = it },
-                    label = { Text("Draft reply / post caption") },
-                    minLines = 2,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(
-                    onClick = { viewModel.requestAuthorizedSocialSend(selectedPlatform, draftText, phoneTarget) },
-                    enabled = draftText.isNotBlank(),
-                    modifier = Modifier.testTag("social_authorize_send_btn")
-                ) {
-                    Text("Authorize & Prepare ${selectedPlatform.displayName} Draft")
-                }
             }
         }
     }
 }
 
 @Composable
-private fun PhoneAndMapsTab(viewModel: TeenaViewModel) {
+private fun PhoneAndMapsTab(
+    viewModel: TeenaViewModel,
+    onOpenMaps: () -> Unit = {}
+) {
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
     val callLogs by viewModel.callLogs.collectAsStateWithLifecycle()
     val liveCall by viewModel.liveCallInfo.collectAsStateWithLifecycle()
     val location by viewModel.currentLocation.collectAsStateWithLifecycle()
     val perms by viewModel.permissionSnapshot.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     var contactQuery by remember { mutableStateOf("") }
     var dialNumber by remember { mutableStateOf("") }
@@ -481,6 +1006,68 @@ private fun PhoneAndMapsTab(viewModel: TeenaViewModel) {
                         enabled = destination.isNotBlank()
                     ) { Text("Nearby") }
                 }
+                OutlinedButton(
+                    onClick = onOpenMaps,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .minimumInteractiveComponentSize()
+                        .testTag("automation_open_map_html_btn")
+                ) {
+                    Text("Open Interactive Map (map.html WebView)")
+                }
+            }
+        }
+
+        // Optional Device Admin Receiver (Direct Mode, manual activation only)
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Optional Device Admin (Direct Mode)",
+                    subtitle = "User must enable manually in Android Settings — never auto-activated",
+                    trailing = {
+                        StatusPill(
+                            when {
+                                perms.deviceAdminActive -> "ACTIVE"
+                                settings.directDeviceAdminEnabled -> "PARTIAL"
+                                else -> "OPTIONAL"
+                            }
+                        )
+                    }
+                )
+                Text(
+                    text = if (perms.deviceAdminActive) {
+                        "Teena Device Admin is active. You can lock screen or revoke access anytime."
+                    } else {
+                        "Currently inactive. Enable option and confirm manually in Android Device Admin prompt if desired."
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!perms.deviceAdminActive) {
+                        Button(
+                            onClick = {
+                                viewModel.toggleDirectDeviceAdmin(true)
+                                viewModel.requestEnableDeviceAdmin()
+                            },
+                            modifier = Modifier.minimumInteractiveComponentSize().testTag("device_admin_enable_btn")
+                        ) {
+                            Text("Enable Manually")
+                        }
+                    } else {
+                        Button(
+                            onClick = { viewModel.lockScreenWithDeviceAdmin() },
+                            modifier = Modifier.minimumInteractiveComponentSize().testTag("device_admin_lock_btn")
+                        ) {
+                            Text("Lock Screen")
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.disableDeviceAdmin() },
+                            modifier = Modifier.minimumInteractiveComponentSize().testTag("device_admin_disable_btn")
+                        ) {
+                            Text("Disable Admin")
+                        }
+                    }
+                }
             }
         }
     }
@@ -506,6 +1093,11 @@ private fun CameraAndMediaTab(
     var lastVideoUri by remember { mutableStateOf<Uri?>(null) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var recordingSeconds by remember { mutableLongStateOf(0L) }
+    var faceDetectionEnabled by remember { mutableStateOf(false) }
+    var faceOverlayState by remember { mutableStateOf(TransientFaceDetectionState()) }
+
+    val faceEngine = remember(context) { TeenaFaceDetectionEngine(context) }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
     val imageCapture = remember { ImageCapture.Builder().build() }
     val recorder = remember {
@@ -514,11 +1106,35 @@ private fun CameraAndMediaTab(
             .build()
     }
     val videoCapture = remember { VideoCapture.withOutput(recorder) }
+    val imageAnalysis = remember {
+        ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+    }
     val previewView = remember { PreviewView(context) }
 
     val camPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { viewModel.refreshSystemHealth() }
+    ) { result ->
+        viewModel.refreshSystemHealth()
+        val camGranted = result[Manifest.permission.CAMERA] == true
+        if (!camGranted) {
+            faceDetectionEnabled = false
+            faceOverlayState = TransientFaceDetectionState(
+                enabled = false,
+                permissionGranted = false,
+                statusNote = "Camera permission denied — face detection stays disabled."
+            )
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            faceEngine.closeDetector()
+            faceOverlayState = TransientFaceDetectionState()
+            runCatching { analysisExecutor.shutdown() }
+        }
+    }
 
     LaunchedEffect(activeRecording != null) {
         if (activeRecording != null) {
@@ -531,7 +1147,7 @@ private fun CameraAndMediaTab(
     }
 
     if (perms.camera) {
-        DisposableEffect(useFrontCamera, lifecycleOwner) {
+        DisposableEffect(useFrontCamera, faceDetectionEnabled, lifecycleOwner) {
             val providerFuture = ProcessCameraProvider.getInstance(context)
             val executor = ContextCompat.getMainExecutor(context)
             providerFuture.addListener({
@@ -542,7 +1158,23 @@ private fun CameraAndMediaTab(
                     }
                     val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
                     provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, videoCapture)
+
+                    if (faceDetectionEnabled && activeRecording == null && TeenaFaceDetectionEngine.hasExplicitCameraPermission(context)) {
+                        imageAnalysis.setAnalyzer(
+                            analysisExecutor,
+                            faceEngine.createAnalyzer(
+                                isFrontCameraProvider = { useFrontCamera },
+                                isEnabledProvider = { faceDetectionEnabled }
+                            ) { nextState ->
+                                faceOverlayState = nextState
+                            }
+                        )
+                        provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, imageAnalysis)
+                    } else {
+                        imageAnalysis.clearAnalyzer()
+                        faceOverlayState = TransientFaceDetectionState(permissionGranted = true)
+                        provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, videoCapture)
+                    }
                     cameraBound = true
                 }.onFailure { e ->
                     cameraBound = false
@@ -550,25 +1182,32 @@ private fun CameraAndMediaTab(
                 }
             }, executor)
             onDispose {
+                imageAnalysis.clearAnalyzer()
+                faceOverlayState = TransientFaceDetectionState(permissionGranted = perms.camera)
                 runCatching { activeRecording?.stop() }
                 activeRecording = null
                 cameraBound = false
                 runCatching { providerFuture.get().unbindAll() }
             }
         }
+    } else if (faceDetectionEnabled) {
+        faceDetectionEnabled = false
+        faceOverlayState = TransientFaceDetectionState(permissionGranted = false)
     }
 
     val (hasFront, hasBack) = remember { viewModel.container.cameraMediaEngine.hasFrontAndBackCamera() }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("camera_media_list"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             NeuralCard {
                 SectionHeader(
-                    title = "CameraX Photo & Video Capture",
+                    title = "CameraX Photo, Video & Face Detection",
                     subtitle = "${if (useFrontCamera) "Front" else "Rear"} Camera • Front=$hasFront, Rear=$hasBack",
                     trailing = {
                         StatusPill(
@@ -597,6 +1236,7 @@ private fun CameraAndMediaTab(
                             .clip(MaterialTheme.shapes.medium)
                     ) {
                         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+                        FaceDetectionOverlay(state = faceOverlayState)
                     }
                     if (activeRecording != null) {
                         Row(
@@ -652,26 +1292,31 @@ private fun CameraAndMediaTab(
                                     currentRec.stop()
                                     activeRecording = null
                                 } else {
-                                    val target = viewModel.container.cameraMediaEngine.createVideoOutputTarget()
-                                    val pending = when (target) {
-                                        is CameraVideoTarget.MediaStoreTarget -> recorder.prepareRecording(context, target.options)
-                                        is CameraVideoTarget.FileTarget -> recorder.prepareRecording(context, target.options)
-                                    }.apply {
-                                        if (perms.recordAudio) withAudioEnabled()
-                                    }
-                                    activeRecording = pending.start(ContextCompat.getMainExecutor(context)) { event ->
-                                        when (event) {
-                                            is VideoRecordEvent.Start -> {
-                                                cameraFeedback = "Video recording started..."
-                                            }
-                                            is VideoRecordEvent.Finalize -> {
-                                                activeRecording = null
-                                                if (event.hasError()) {
-                                                    cameraFeedback = "Video error (${event.error}): ${event.cause?.localizedMessage ?: "Failed"}"
-                                                } else {
-                                                    val uri = event.outputResults.outputUri
-                                                    lastVideoUri = uri
-                                                    cameraFeedback = "Video saved: $uri"
+                                    if (faceDetectionEnabled) {
+                                        faceDetectionEnabled = false
+                                        cameraFeedback = "Paused face detection to start video capture."
+                                    } else {
+                                        val target = viewModel.container.cameraMediaEngine.createVideoOutputTarget()
+                                        val pending = when (target) {
+                                            is CameraVideoTarget.MediaStoreTarget -> recorder.prepareRecording(context, target.options)
+                                            is CameraVideoTarget.FileTarget -> recorder.prepareRecording(context, target.options)
+                                        }.apply {
+                                            if (perms.recordAudio) withAudioEnabled()
+                                        }
+                                        activeRecording = pending.start(ContextCompat.getMainExecutor(context)) { event ->
+                                            when (event) {
+                                                is VideoRecordEvent.Start -> {
+                                                    cameraFeedback = "Video recording started..."
+                                                }
+                                                is VideoRecordEvent.Finalize -> {
+                                                    activeRecording = null
+                                                    if (event.hasError()) {
+                                                        cameraFeedback = "Video error (${event.error}): ${event.cause?.localizedMessage ?: "Failed"}"
+                                                    } else {
+                                                        val uri = event.outputResults.outputUri
+                                                        lastVideoUri = uri
+                                                        cameraFeedback = "Video saved: $uri"
+                                                    }
                                                 }
                                             }
                                         }
@@ -763,6 +1408,57 @@ private fun CameraAndMediaTab(
                 }
                 if (cameraFeedback.isNotBlank()) {
                     Text(cameraFeedback, style = MaterialTheme.typography.bodySmall, color = NeuralCyan)
+                }
+            }
+        }
+
+        // On-Device ML Kit Face Detection Card (strictly transient RAM only, requires CAMERA permission)
+        item {
+            NeuralCard(borderColor = NeuralCyan.copy(alpha = 0.45f)) {
+                SectionHeader(
+                    title = "ML Kit Face Detection (On-Device)",
+                    subtitle = TeenaFaceDetectionEngine.PRIVACY_GUARANTEE,
+                    trailing = {
+                        StatusPill(
+                            when {
+                                !perms.camera -> "BLOCKED"
+                                faceDetectionEnabled -> "ACTIVE"
+                                else -> "OFF"
+                            },
+                            modifier = Modifier.testTag("camera_face_detection_status")
+                        )
+                    }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Live Face Bounding Box Overlay", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (perms.camera) faceOverlayState.statusNote
+                            else "Grant CAMERA permission first to run on-device face detection.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = faceDetectionEnabled && perms.camera,
+                        onCheckedChange = { wantEnable ->
+                            if (!perms.camera) {
+                                faceDetectionEnabled = false
+                                camPermLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
+                            } else {
+                                faceDetectionEnabled = wantEnable
+                                if (!wantEnable) {
+                                    faceOverlayState = TransientFaceDetectionState(permissionGranted = true)
+                                    faceEngine.closeDetector()
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("camera_face_detection_switch")
+                    )
                 }
             }
         }

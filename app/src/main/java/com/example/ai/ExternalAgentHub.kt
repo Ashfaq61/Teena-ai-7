@@ -34,6 +34,13 @@ data class AdvisorConsultationSummary(
     val messages: List<ExternalCollabMessageEntity>
 )
 
+data class AdvisorQuotaStatus(
+    val usedLastHour: Int,
+    val limitPerHour: Int
+) {
+    val remaining: Int get() = (limitPerHour - usedLastHour).coerceAtLeast(0)
+}
+
 /**
  * Coordinates real API communication with external AI advisors:
  * - Distinct models/providers discovered via ModelRegistry & API Manager (Gemini, Groq, OpenRouter, Custom OpenAI)
@@ -43,7 +50,7 @@ data class AdvisorConsultationSummary(
  * Security & privacy guarantee:
  * - Never sends API keys, personal memories, contacts, call logs, or screen contents to advisors.
  * - Advisor outputs are wrapped in <untrusted_data> and treated strictly as suggestions, never commands.
- * - Gated on user "External AI Calls" switch + EmergencyStopController.
+ * - Gated on user "External AI Calls" switch + EmergencyStopController + configurable hourly rate limit.
  */
 class ExternalAgentHub(
     private val db: TeenaDatabase,
@@ -52,9 +59,15 @@ class ExternalAgentHub(
     private val emergencyStopController: EmergencyStopController
 ) {
 
+    suspend fun getAdvisorQuotaStatus(limitPerHour: Int = 12): AdvisorQuotaStatus {
+        val safeLimit = limitPerHour.coerceIn(1, 200)
+        val since = System.currentTimeMillis() - 3_600_000L
+        val used = db.externalCollabDao().countMessagesSince(since)
+        return AdvisorQuotaStatus(usedLastHour = used, limitPerHour = safeLimit)
+    }
+
     suspend fun syncProviderModelAdvisors() {
         val slots = db.providerSlotDao().getSlotsOnce()
-        val cachedGemini = db.geminiModelDao().getModelsForKeyOnce("").ifEmpty { emptyList() }
         val existing = db.externalAdvisorDao().getAdvisorsOnce().associateBy { it.advisorId }
         val synced = mutableListOf<ExternalAdvisorEntity>()
 
@@ -95,7 +108,7 @@ class ExternalAgentHub(
                     val ranked = network.modelRegistry.getCachedModelsForKey(apiKey)
                         .filter { it.supportsGenerateContent && it.probeStatus != "BLACKLISTED" }
                         .filter { it.modelId != slot.selectedModel && !it.modelId.contains("tts", true) }
-                        .take(2)
+                        .take(3)
                     ranked.forEach { m ->
                         val peerId = "adv_gem_${slot.slotId}_${m.modelId.replace(Regex("[^a-zA-Z0-9_]"), "_")}"
                         val prevPeer = existing[peerId]
@@ -137,7 +150,7 @@ class ExternalAgentHub(
                         endpointUrl = slot.baseUrl,
                         status = status,
                         lastResponseTimeMs = prev?.lastResponseTimeMs ?: slot.lastLatencyMs,
-                        lastStatusMessage = prev?.lastStatusMessage ?: slot.lastTestMessage,
+                        lastStatusMessage = if (!hasKey && type != ProviderType.CUSTOM_OPENAI) "API key missing" else prev?.lastStatusMessage ?: slot.lastTestMessage,
                         capabilities = "Cross-provider reasoning (${type.displayName})",
                         isEnabled = prev?.isEnabled ?: slot.isEnabled,
                         lastCheckedAt = prev?.lastCheckedAt ?: slot.lastTestedAt
@@ -156,8 +169,6 @@ class ExternalAgentHub(
         if (synced.isNotEmpty()) {
             db.externalAdvisorDao().upsertAdvisors(synced)
         }
-        // Keep unused reference clean
-        cachedGemini.size
     }
 
     suspend fun addCustomExternalAdvisor(
@@ -207,7 +218,6 @@ class ExternalAgentHub(
         return runCatching {
             emergencyStopController.assertExternalAiAdvisorAllowed("probe advisor ${advisor.name}")
             val token = vault.readSecret("advisor_token_${advisor.advisorId}")
-            val start = System.currentTimeMillis()
             val updated = when (advisor.sourceType) {
                 "MCP_SERVER" -> {
                     val probe = network.probeMcpServer(advisor.endpointUrl, token).getOrThrow()
@@ -256,33 +266,45 @@ class ExternalAgentHub(
         }
     }
 
+    /**
+     * Detects capability gaps from ALL 4 real sources:
+     * 1. System Health Check (feature_verifications)
+     * 2. Failed Tasks (agent_states, agent_collaborations, marketplace_tools)
+     * 3. User Feature Requests & Unresolved Chat Prompts (messages, strictly PII-sanitized)
+     * 4. External Advisor Suggestions (external_collab_messages)
+     */
     suspend fun detectCapabilityGaps(): List<CapabilityGapReport> {
         val gaps = mutableListOf<CapabilityGapReport>()
         val verifications = db.featureVerificationDao().getAllOnce()
         val agents = db.agentDao().getAgentsOnce()
         val failedCollabs = db.agentDao().getCollaborationsOnce().filter { it.outcomeStatus == "FAILED" }
-        val blockedOrFailedTools = db.marketplaceToolDao().getToolsOnce()
+        val allTools = db.marketplaceToolDao().getToolsOnce()
+        val blockedOrFailedTools = allTools
             .filter { it.activationStatus == FeatureStatus.FAILED.name || it.activationStatus == FeatureStatus.BLOCKED.name }
+        val recentMessages = db.conversationDao().getAllMessagesOnce()
+        val recentAdvisorReplies = db.externalCollabDao().getMessagesOnce().filter { it.succeeded }
 
+        // Source 1: Health Check
         verifications.filter {
             !it.runtimeTestPassed || it.status == FeatureStatus.PARTIAL.name || it.status == FeatureStatus.BLOCKED.name
-        }.take(4).forEach { fv ->
+        }.take(3).forEach { fv ->
             gaps.add(
                 CapabilityGapReport(
                     gapId = "gap_feat_${fv.featureId}",
-                    title = "Unverified or Partial Capability: ${fv.featureId}",
-                    reason = "${fv.status}: ${fv.lastTestSummary}",
+                    title = "Health Check Gap: ${fv.featureId}",
+                    reason = "[Health Check] ${fv.status}: ${fv.lastTestSummary}",
                     suggestedTechnicalQuestion = "For an Android Kotlin + Jetpack Compose AI assistant, what is the cleanest Play-Policy-compliant architecture, library, and runtime test approach to make '${fv.featureId}' reliably active (${fv.lastTestSummary})?"
                 )
             )
         }
 
-        agents.filter { it.tasksFailed > 0 }.take(3).forEach { agent ->
+        // Source 2: Failed Tasks
+        agents.filter { it.tasksFailed > 0 }.take(2).forEach { agent ->
             gaps.add(
                 CapabilityGapReport(
                     gapId = "gap_agent_${agent.agentId}",
-                    title = "Agent Reliability Gap: ${agent.displayName}",
-                    reason = "${agent.tasksFailed} failed task(s); health=${agent.healthStatus} (${agent.healthReason})",
+                    title = "Failed Agent Tasks: ${agent.displayName}",
+                    reason = "[Failed Task] ${agent.tasksFailed} failed task(s); health=${agent.healthStatus} (${agent.healthReason})",
                     suggestedTechnicalQuestion = "An Android agent handling '${agent.specialty}' has failed tasks (${agent.healthReason}). Recommend the best library, fallback design, and validation checks to harden it."
                 )
             )
@@ -293,7 +315,7 @@ class ExternalAgentHub(
                 CapabilityGapReport(
                     gapId = "gap_collab_${collab.id}",
                     title = "Failed Task Handoff (${collab.fromAgentId})",
-                    reason = collab.protocolPayload.take(180),
+                    reason = "[Failed Task] ${collab.protocolPayload.take(180)}",
                     suggestedTechnicalQuestion = "How can an Android assistant safely resolve this failed sub-task without unsafe dynamic code loading: ${collab.protocolPayload.take(200)}?"
                 )
             )
@@ -303,19 +325,68 @@ class ExternalAgentHub(
             gaps.add(
                 CapabilityGapReport(
                     gapId = "gap_tool_${tool.toolId}",
-                    title = "Tool Needs Remediation: ${tool.name}",
-                    reason = "${tool.activationStatus}: ${tool.testResult}",
+                    title = "Failed/Blocked Tool: ${tool.name}",
+                    reason = "[Failed Tool] ${tool.activationStatus}: ${tool.testResult}",
                     suggestedTechnicalQuestion = "How should tool '${tool.name}' (${tool.category}, ${tool.licenseSpdx}) be redesigned to pass security scanning and deterministic runtime verification? Current failure: ${tool.testResult}"
                 )
             )
         }
+
+        // Source 3: User Requests (strictly sanitized — no keys, emails, phone numbers, or personal names sent externally)
+        val requestKeywords = listOf(
+            "feature", "tool", "bana", "banao", "add ", "support", "formatter", "converter",
+            "extractor", "scanner", "integrate", "chahiye", "nayi", "naya", "karo"
+        )
+        recentMessages
+            .filter { it.role == "user" }
+            .filter { m ->
+                val lower = m.content.lowercase()
+                m.content.length in 10..260 && requestKeywords.any { lower.contains(it) }
+            }
+            .take(2)
+            .forEach { msg ->
+                val cleanSnippet = SecurityAuditor.sanitizeTechnicalQuestionForAdvisor(msg.content).take(120)
+                if (cleanSnippet.isNotBlank()) {
+                    gaps.add(
+                        CapabilityGapReport(
+                            gapId = "gap_user_req_${msg.id}",
+                            title = "User Request: ${cleanSnippet.take(42)}",
+                            reason = "[User Request] User asked for capability: $cleanSnippet",
+                            suggestedTechnicalQuestion = "A mobile assistant user asked for a capability like: '$cleanSnippet'. Suggest a safe declarative JSON spec or MIT/Apache-2.0 Kotlin library design complying with Android Play Policy."
+                        )
+                    )
+                }
+            }
+
+        // Source 4: Advisors' Suggestions from ExternalCollabMessages not yet converted to a tool
+        recentAdvisorReplies
+            .filter { reply ->
+                allTools.none { t -> t.proposedBy.contains(reply.advisorName, ignoreCase = true) && t.name.contains(reply.topic.take(12), ignoreCase = true) }
+            }
+            .take(2)
+            .forEach { reply ->
+                val cleanExcerpt = UntrustedContentSanitizer.wrapAsUntrustedData("advisor:${reply.advisorName}", reply.rawResponse, 200)
+                    .lineSequence()
+                    .filterNot { it.startsWith("<untrusted_data") || it.startsWith("</untrusted_data") }
+                    .joinToString(" ")
+                    .trim()
+                    .take(150)
+                gaps.add(
+                    CapabilityGapReport(
+                        gapId = "gap_advisor_${reply.id}",
+                        title = "Advisor Suggestion: ${reply.topic.take(40)}",
+                        reason = "[Advisor ${reply.advisorName} / ${reply.advisorModel}] $cleanExcerpt",
+                        suggestedTechnicalQuestion = "Build or refine a declarative Marketplace tool addressing advisor suggestion on '${reply.topic}': $cleanExcerpt"
+                    )
+                )
+            }
 
         if (gaps.isEmpty()) {
             gaps.add(
                 CapabilityGapReport(
                     gapId = "gap_research_evolution",
                     title = "Self-Improvement Capability Expansion",
-                    reason = "No failing tasks recorded; evaluate new Android/AI capabilities for marketplace proposals.",
+                    reason = "All checked subsystems healthy; evaluate new Android/AI capabilities for marketplace proposals.",
                     suggestedTechnicalQuestion = "What high-value, Play-Policy-compliant declarative tools or open-source Android Kotlin libraries (MIT/Apache-2.0) should an autonomous assistant add next?"
                 )
             )
@@ -325,16 +396,33 @@ class ExternalAgentHub(
 
     /**
      * Queries at least 2 distinct external advisors with a privacy-sanitized technical question,
-     * compares their recommendations, and stores every message & comparison in Room.
+     * compares their recommendations, enforces hourly rate limits, and stores every message & comparison in Room.
      */
     suspend fun consultExternalAdvisors(
         topic: String,
         rawTechnicalQuestion: String,
         gapReason: String = "Manual or capability-gap consultation",
-        minAdvisorsToAsk: Int = 2
+        minAdvisorsToAsk: Int = 2,
+        hourlyLimit: Int = 12
     ): Result<AdvisorConsultationSummary> {
         return runCatching {
             emergencyStopController.assertExternalAiAdvisorAllowed("external advisor consultation")
+
+            val quota = getAdvisorQuotaStatus(hourlyLimit)
+            if (quota.usedLastHour >= quota.limitPerHour) {
+                db.systemRecordsDao().insertAuditLog(
+                    AuditLogEntity(
+                        category = "RATE_LIMIT",
+                        action = "Advisor consultation throttled ($topic)",
+                        outcome = "BLOCKED",
+                        details = "Used ${quota.usedLastHour}/${quota.limitPerHour} advisor calls in last hour."
+                    )
+                )
+                throw IllegalStateException(
+                    "Advisor hourly rate limit poora ho gaya (${quota.usedLastHour}/${quota.limitPerHour} calls/hr). Settings mein limit badhain ya thori dair intezar karein."
+                )
+            }
+
             syncProviderModelAdvisors()
 
             // Strictly sanitize technical question — never leaks keys, memories, contacts, or screen text
@@ -348,10 +436,17 @@ class ExternalAgentHub(
             val allEnabled = db.externalAdvisorDao().getAdvisorsOnce()
                 .filter { it.isEnabled && it.status != FeatureStatus.BLOCKED.name }
 
-            // Order: ready/active MCP & A2A first or distinct providers/models so multiple perspectives are queried
-            val candidates = selectDiverseAdvisors(allEnabled, minAdvisorsToAsk.coerceAtLeast(2))
+            val maxAllowedNow = (quota.limitPerHour - quota.usedLastHour).coerceAtLeast(1)
+            val askCount = minAdvisorsToAsk.coerceAtLeast(2).coerceAtMost(maxAllowedNow.coerceAtLeast(2))
+            if (quota.usedLastHour + 2 > quota.limitPerHour && allEnabled.size >= 2) {
+                throw IllegalStateException(
+                    "Hourly rate limit bacha hua (${quota.remaining} calls) kam az kam 2 advisors ke liye kaafi nahi (${quota.usedLastHour}/${quota.limitPerHour})."
+                )
+            }
+
+            val candidates = selectDiverseAdvisors(allEnabled, askCount)
             if (candidates.isEmpty()) {
-                throw IllegalStateException("No configured external advisors are ready (add API keys in API Manager or MCP/A2A servers).")
+                throw IllegalStateException("Koi configured external advisor tayyar nahi (API Manager mein key ya MCP/A2A URL add karein).")
             }
 
             val sessionId = "collab_${UUID.randomUUID().toString().take(8)}"

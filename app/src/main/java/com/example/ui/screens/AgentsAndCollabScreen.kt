@@ -55,6 +55,7 @@ fun AgentsAndCollabScreen(viewModel: TeenaViewModel) {
     val advisors by viewModel.externalAdvisors.collectAsStateWithLifecycle()
     val externalMessages by viewModel.externalCollabMessages.collectAsStateWithLifecycle()
     val gaps by viewModel.capabilityGaps.collectAsStateWithLifecycle()
+    val advisorQuota by viewModel.advisorQuotaStatus.collectAsStateWithLifecycle()
     val comparisonReport by viewModel.advisorComparisonReport.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
@@ -87,7 +88,7 @@ fun AgentsAndCollabScreen(viewModel: TeenaViewModel) {
                 Column(Modifier.weight(1f)) {
                     Text("External AI Calls (Advisors / MCP / A2A)", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "Privacy lock: Never sends API keys, memory, contacts, or screen text — technical questions only.",
+                        "Privacy lock: Never sends API keys, memory, contacts, or screen text • Quota: ${advisorQuota.usedLastHour}/${advisorQuota.limitPerHour} calls/hr",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -103,10 +104,10 @@ fun AgentsAndCollabScreen(viewModel: TeenaViewModel) {
         }
 
         ScrollableTabRow(selectedTabIndex = tabIndex, edgePadding = 8.dp) {
-            Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("17 Agents") })
-            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("External Advisors (${advisors.size})") })
-            Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("Advisor Collab (${externalMessages.size})") })
-            Tab(selected = tabIndex == 3, onClick = { tabIndex = 3 }, text = { Text("Internal Logs") })
+            Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("17 Agents", maxLines = 1, softWrap = false) })
+            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("Advisors (${advisors.size})", maxLines = 1, softWrap = false) })
+            Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("Collab (${externalMessages.size})", maxLines = 1, softWrap = false) })
+            Tab(selected = tabIndex == 3, onClick = { tabIndex = 3 }, text = { Text("Internal Logs", maxLines = 1, softWrap = false) })
         }
 
         LazyColumn(
@@ -293,10 +294,10 @@ fun AgentsAndCollabScreen(viewModel: TeenaViewModel) {
                         NeuralCard {
                             SectionHeader(
                                 title = "Detect Gaps & Ask >=2 External Advisors",
-                                subtitle = "Teena asks technical questions (tool, library, design), compares >=2 real API replies & stores in Room",
+                                subtitle = "4 sources: Health Check, Failed Tasks, User Requests, Advisor Suggestions (Quota: ${advisorQuota.usedLastHour}/${advisorQuota.limitPerHour}/hr)",
                                 trailing = {
                                     OutlinedButton(onClick = { viewModel.detectAndRefreshGaps() }) {
-                                        Text("Scan Gaps")
+                                        Text("Scan Gaps", maxLines = 1, softWrap = false)
                                     }
                                 }
                             )

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,13 +56,19 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.TeenaIdentityEngine
+import com.example.ai.WebsiteForgeEngine
+import com.example.ui.components.RichMathChatText
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralViolet
 import com.example.ui.theme.StatusCrimson
 import com.example.ui.viewmodel.TeenaViewModel
 
 @Composable
-fun ChatScreen(viewModel: TeenaViewModel) {
+fun ChatScreen(
+    viewModel: TeenaViewModel,
+    onOpenWebsiteForge: () -> Unit = {}
+) {
     val conversations by viewModel.conversations.collectAsStateWithLifecycle()
     val activeId by viewModel.activeConversationId.collectAsStateWithLifecycle()
     val messages by viewModel.messages.collectAsStateWithLifecycle()
@@ -70,6 +77,9 @@ fun ChatScreen(viewModel: TeenaViewModel) {
     val chatError by viewModel.chatError.collectAsStateWithLifecycle()
     val attachedBitmap by viewModel.attachedImage.collectAsStateWithLifecycle()
     val attachedNote by viewModel.attachedDocNote.collectAsStateWithLifecycle()
+    val websiteForgeIntent by viewModel.websiteForgeIntent.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val activePreset = TeenaIdentityEngine.presetFor(settings.personalityId)
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -108,6 +118,10 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                 leadingIcon = { Icon(Icons.Default.Add, contentDescription = "New Conversation") },
                 modifier = Modifier.testTag("chat_new_session_btn")
             )
+            StatusPill(
+                status = activePreset.title,
+                modifier = Modifier.testTag("chat_active_persona_pill")
+            )
             conversations.forEach { conv ->
                 val selected = conv.id == activeId
                 Surface(
@@ -145,7 +159,7 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                             color = NeuralCyan
                         )
                         Text(
-                            "Speak or type in English, Urdu (اردو), or Roman Urdu. Attach images or PDFs for multimodal analysis, or issue device commands like 'torch on karo' or 'open WhatsApp'.",
+                            "Speak or type in Hindi, Hinglish, Roman Urdu, Urdu (اردو), or English. Supports LaTeX math ($...$ / $$...$$), images/PDFs, 'website banao', or device commands like 'torch on karo'.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -155,6 +169,7 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                         ) {
                             listOf(
                                 "Summarize my device readiness",
+                                "Explain quadratic formula with LaTeX",
                                 "Torch on karo",
                                 "آج کا موسم اور وقت کے مطابق ایک مختصر دعا لکھیں"
                             ).forEach { prompt ->
@@ -192,10 +207,9 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                             modifier = Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Text(
+                            RichMathChatText(
                                 text = msg.content,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface
+                                textColor = MaterialTheme.colorScheme.onSurface
                             )
                             if (!isUser && msg.providerUsed.isNotBlank()) {
                                 Text(
@@ -203,6 +217,20 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                                     style = MaterialTheme.typography.labelSmall,
                                     color = NeuralCyan
                                 )
+                            }
+                            if (!isUser && remember(msg.id, msg.content) {
+                                    WebsiteForgeEngine.extractHtmlDocumentFromText(msg.content) != null
+                                }
+                            ) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        viewModel.importWebsiteFromChatMessage("Chat Website", msg.content)
+                                        onOpenWebsiteForge()
+                                    },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Text("Open WebGL Live Preview")
+                                }
                             }
                         }
                     }
@@ -216,9 +244,9 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier.widthIn(max = 340.dp)
                     ) {
-                        Text(
+                        RichMathChatText(
                             text = streamingText,
-                            style = MaterialTheme.typography.bodyMedium,
+                            textColor = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.padding(12.dp)
                         )
                     }
@@ -247,6 +275,37 @@ fun ChatScreen(viewModel: TeenaViewModel) {
                         )
                         Text(chatError.orEmpty(), style = MaterialTheme.typography.bodySmall)
                     }
+                }
+            }
+        }
+
+        // Website Builder intent notice ("website banao" detected)
+        if (!websiteForgeIntent.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(NeuralCyan.copy(alpha = 0.14f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Website Forge active for \"${websiteForgeIntent.orEmpty().take(32)}\"",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = NeuralCyan,
+                    modifier = Modifier.weight(1f)
+                )
+                FilledTonalButton(
+                    onClick = onOpenWebsiteForge,
+                    modifier = Modifier.minimumInteractiveComponentSize().testTag("chat_open_website_forge_btn")
+                ) {
+                    Text("Preview WebGL")
+                }
+                IconButton(
+                    onClick = { viewModel.clearWebsiteForgeIntent() },
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Dismiss website notice")
                 }
             }
         }

@@ -161,8 +161,26 @@ interface ExternalCollabDao {
     @Query("SELECT * FROM external_collab_messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
     suspend fun getSessionMessages(sessionId: String): List<ExternalCollabMessageEntity>
 
+    @Query("SELECT COUNT(*) FROM external_collab_messages WHERE createdAt >= :sinceMillis")
+    suspend fun countMessagesSince(sinceMillis: Long): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(msg: ExternalCollabMessageEntity): Long
+}
+
+@Dao
+interface CapabilitySummaryDao {
+    @Query("SELECT * FROM capability_summaries ORDER BY updatedAt DESC")
+    fun observeAll(): Flow<List<CapabilitySummaryEntity>>
+
+    @Query("SELECT * FROM capability_summaries ORDER BY updatedAt DESC")
+    suspend fun getAllOnce(): List<CapabilitySummaryEntity>
+
+    @Query("SELECT * FROM capability_summaries WHERE itemKey = :itemKey LIMIT 1")
+    suspend fun getByKey(itemKey: String): CapabilitySummaryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(summary: CapabilitySummaryEntity)
 }
 
 @Dao
@@ -227,6 +245,12 @@ interface SystemRecordsDao {
     @Query("SELECT * FROM notification_records ORDER BY timestamp DESC LIMIT 100")
     fun observeNotifications(): Flow<List<NotificationRecordEntity>>
 
+    @Query("SELECT * FROM notification_records WHERE packageName LIKE '%whatsapp%' ORDER BY timestamp DESC LIMIT 50")
+    fun observeWhatsAppNotifications(): Flow<List<NotificationRecordEntity>>
+
+    @Query("SELECT * FROM notification_records WHERE packageName LIKE '%whatsapp%' ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getLatestWhatsAppNotifications(limit: Int): List<NotificationRecordEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertNotification(record: NotificationRecordEntity): Long
 
@@ -278,3 +302,43 @@ interface CodeVaultDao {
     @Query("DELETE FROM code_vault_entries WHERE vaultId = :vaultId")
     suspend fun deleteVaultEntry(vaultId: String)
 }
+
+@Dao
+interface ScreenAutomationLogDao {
+    @Query("SELECT * FROM screen_automation_logs ORDER BY createdAt DESC, id DESC LIMIT 150")
+    fun observeLogs(): Flow<List<ScreenAutomationLogEntity>>
+
+    @Query("SELECT * FROM screen_automation_logs WHERE sessionId = :sessionId ORDER BY stepNumber ASC, id ASC")
+    suspend fun getSessionLogs(sessionId: String): List<ScreenAutomationLogEntity>
+
+    @Query("SELECT * FROM screen_automation_logs ORDER BY createdAt DESC, id DESC LIMIT 150")
+    suspend fun getAllLogsOnce(): List<ScreenAutomationLogEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLog(entry: ScreenAutomationLogEntity): Long
+
+    @Query("DELETE FROM screen_automation_logs")
+    suspend fun clearLogs()
+}
+
+@Dao
+interface TriggerDao {
+    @Query("SELECT * FROM triggers ORDER BY enabled DESC, triggerAtMillis ASC")
+    fun observeTriggers(): Flow<List<TriggerEntity>>
+
+    @Query("SELECT * FROM triggers WHERE enabled = 1 ORDER BY triggerAtMillis ASC")
+    suspend fun getEnabledTriggersOnce(): List<TriggerEntity>
+
+    @Query("SELECT * FROM triggers WHERE id = :id LIMIT 1")
+    suspend fun getTriggerById(id: Long): TriggerEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTrigger(trigger: TriggerEntity): Long
+
+    @Query("UPDATE triggers SET enabled = :enabled WHERE id = :id")
+    suspend fun setTriggerEnabled(id: Long, enabled: Boolean)
+
+    @Query("DELETE FROM triggers WHERE id = :id")
+    suspend fun deleteTrigger(id: Long)
+}
+

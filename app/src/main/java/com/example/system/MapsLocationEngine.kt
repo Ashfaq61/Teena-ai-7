@@ -100,4 +100,42 @@ class MapsLocationEngine(private val context: Context) {
             "Opened Maps search for '$query'."
         }
     }
+
+    companion object {
+        const val ASSET_MAP_URL = "file:///android_asset/map.html"
+
+        fun escapeJsString(raw: String): String =
+            raw.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\"", "\\\"")
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .trim()
+
+        fun buildSetLocationJs(
+            latitude: Double,
+            longitude: Double,
+            accuracyMeters: Float = 0f,
+            label: String = "Current Location"
+        ): String {
+            val safeLat = latitude.coerceIn(-85.0, 85.0)
+            val safeLng = longitude.coerceIn(-180.0, 180.0)
+            val safeAcc = accuracyMeters.coerceAtLeast(0f)
+            val safeLabel = escapeJsString(label.ifBlank { "Current Location" }.take(60))
+            return "window.TeenaMap && window.TeenaMap.setLocation($safeLat, $safeLng, $safeAcc, '$safeLabel');"
+        }
+
+        fun buildSearchFocusJs(
+            query: String,
+            location: DeviceLocationInfo? = null
+        ): String {
+            val safeQuery = escapeJsString(query.ifBlank { "Search Pin" }.take(60))
+            return if (location != null) {
+                "window.TeenaMap && window.TeenaMap.setSearchFocus('$safeQuery', ${location.latitude.coerceIn(-85.0, 85.0)}, ${location.longitude.coerceIn(-180.0, 180.0)});"
+            } else {
+                "window.TeenaMap && window.TeenaMap.setSearchFocus('$safeQuery');"
+            }
+        }
+    }
 }
+

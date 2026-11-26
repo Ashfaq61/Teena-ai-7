@@ -24,27 +24,45 @@ data class OfflineIntentResult(
 
 class OfflineCapabilitiesEngine(private val context: Context) {
 
-    private val romanUrduTokens = setOf(
-        "kya", "kaise", "kaisi", "karo", "kholo", "batao", "mera", "meri", "tum",
-        "aaj", "kal", "bhai", "yaar", "samjho", "chahiye", "jaldi", "milao",
-        "roshni", "torch", "awaz", "zyada", "kam", "band", "shuru", "bhaijaan",
-        "acha", "theek", "shukriya", "madad", "likho", "padho", "bhejo", "dekho"
-    )
+    companion object {
+        private val romanUrduMarkers = setOf(
+            "kya", "kaise", "kaisi", "karo", "kholo", "batao", "mera", "meri", "tum",
+            "aaj", "kal", "bhai", "yaar", "samjho", "chahiye", "jaldi", "milao",
+            "roshni", "torch", "awaz", "zyada", "kam", "band", "shuru", "bhaijaan",
+            "acha", "theek", "shukriya", "madad", "likho", "padho", "bhejo", "dekho",
+            "banao", "chalao", "ammi", "abbu", "khuda", "allah", "subah", "shaam"
+        )
 
-    fun detectLanguage(input: String): String {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) return "English"
-        val hasArabicScript = trimmed.any { it in '\u0600'..'\u06FF' || it in '\u0750'..'\u077F' }
-        if (hasArabicScript) return "Urdu"
+        private val hinglishStrongMarkers = setOf(
+            "namaste", "dhanyavaad", "kripya", "bataiye", "kijiye", "banaiye",
+            "kaise", "kahan", "kyun", "kyon", "haan", "nahi", "nahin", "accha",
+            "suno", "chalo", "karna", "hindi", "hinglish", "dost", "mitra", "papa",
+            "mummy", "didi", "bhaiya", "krishna", "ram", "sab", "kuch", "bahut"
+        )
 
-        val words = trimmed.lowercase().split(Regex("[^a-z]+")).filter { it.isNotBlank() }
-        val romanMatches = words.count { it in romanUrduTokens }
-        return if (romanMatches >= 1 && (romanMatches * 100 / words.size.coerceAtLeast(1) >= 15 || romanMatches >= 2)) {
-            "Roman Urdu"
-        } else {
-            "English"
+        fun detectLanguageText(input: String): String {
+            val trimmed = input.trim()
+            if (trimmed.isEmpty()) return "English"
+            val hasDevanagari = trimmed.any { it in '\u0900'..'\u097F' }
+            if (hasDevanagari) return "Hindi"
+
+            val hasArabicScript = trimmed.any { it in '\u0600'..'\u06FF' || it in '\u0750'..'\u077F' }
+            if (hasArabicScript) return "Urdu"
+
+            val words = trimmed.lowercase().split(Regex("[^a-z]+")).filter { it.isNotBlank() }
+            if (words.isEmpty()) return "English"
+            val hinglishHits = words.count { it in hinglishStrongMarkers }
+            val romanUrduHits = words.count { it in romanUrduMarkers }
+            val totalIndicRomanHits = (words.count { it in hinglishStrongMarkers || it in romanUrduMarkers })
+
+            if (totalIndicRomanHits >= 1 && (totalIndicRomanHits * 100 / words.size >= 15 || totalIndicRomanHits >= 2)) {
+                return if (hinglishHits > romanUrduHits) "Hinglish" else "Roman Urdu"
+            }
+            return "English"
         }
     }
+
+    fun detectLanguage(input: String): String = detectLanguageText(input)
 
     fun inspectHardware(): LocalHardwareProfile {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -14,15 +15,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,8 +37,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.CapabilitySummaryAnalyzer
 import com.example.ai.ToolCreationPipelineEngine
 import com.example.data.local.FeatureStatus
 import com.example.ui.theme.NeuralCyan
@@ -59,9 +64,17 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
     var runtimeInput by remember { mutableStateOf("kotlin android") }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = tabIndex) {
-            Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("Marketplace (${tools.size})") })
-            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("11-Stage Pipeline") })
+        ScrollableTabRow(selectedTabIndex = tabIndex, edgePadding = 8.dp) {
+            Tab(
+                selected = tabIndex == 0,
+                onClick = { tabIndex = 0 },
+                text = { Text("Marketplace (${tools.size})", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+            )
+            Tab(
+                selected = tabIndex == 1,
+                onClick = { tabIndex = 1 },
+                text = { Text("10-Stage Pipeline", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+            )
         }
 
         LazyColumn(
@@ -71,9 +84,52 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
         ) {
             if (tabIndex == 0) {
                 item {
+                    NeuralCard(
+                        borderColor = if (settings.autoActivateSafeDeclarativeTools) NeuralMint.copy(alpha = 0.5f) else NeuralCyan.copy(alpha = 0.35f)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Auto Mode (Safe Declarative Tools)", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Sirf zero-permission, zero-network, non-sensitive declarative tools test+scan pass hone par auto-activate (Undo + Notification ke sath).",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.autoActivateSafeDeclarativeTools,
+                                onCheckedChange = { enabled ->
+                                    viewModel.updateSettings { it.copy(autoActivateSafeDeclarativeTools = enabled) }
+                                },
+                                modifier = Modifier.testTag("marketplace_auto_mode_switch")
+                            )
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            FilledTonalButton(
+                                onClick = { viewModel.detectGapsAndProposeTools() },
+                                enabled = !isBusy,
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 140.dp, minHeight = 48.dp)
+                                    .testTag("detect_gaps_propose_btn")
+                            ) {
+                                Text("Detect Gaps & Propose", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+
+                item {
                     SectionHeader(
                         title = "Tool & Proposal Marketplace",
-                        subtitle = "All tools track Proposer, Version, License, Scan, Test, Pipeline Stage, Status & History"
+                        subtitle = "Proposer, License, Scan, Test, 10-Stage Pipeline, Capability Brief & History"
                     )
                     OutlinedTextField(
                         value = runtimeInput,
@@ -93,9 +149,14 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                     val parsedStages = remember(tool.pipelineStagesJson) {
                         ToolCreationPipelineEngine.parseStages(tool.pipelineStagesJson)
                     }
+                    val parsedBrief = remember(tool.capabilitySummaryJson) {
+                        CapabilitySummaryAnalyzer.fromJsonString(tool.capabilitySummaryJson)
+                    }
                     var showHistory by remember(tool.toolId) { mutableStateOf(false) }
 
-                    NeuralCard {
+                    NeuralCard(
+                        borderColor = if (tool.autoActivated) StatusAmber.copy(alpha = 0.65f) else NeuralCyan.copy(alpha = 0.35f)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -112,8 +173,23 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                             StatusPill(tool.activationStatus)
                         }
 
-                        Text("Proposed By: ${tool.proposedBy}", style = MaterialTheme.typography.labelMedium, color = NeuralMint)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Proposed By: ${tool.proposedBy}", style = MaterialTheme.typography.labelMedium, color = NeuralMint, modifier = Modifier.weight(1f))
+                            if (tool.autoActivated) {
+                                StatusPill("AUTO-ACTIVATED")
+                            }
+                        }
+
                         Text(tool.description, style = MaterialTheme.typography.bodySmall)
+
+                        if (parsedBrief != null) {
+                            CapabilityBriefBlock(parsedBrief = parsedBrief)
+                        }
+
                         Text("Security Scan: ${tool.scanResult} (${tool.securityScore}/100)", style = MaterialTheme.typography.labelSmall)
                         Text("Test Result: ${tool.testResult}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (tool.branchName.isNotBlank()) {
@@ -124,7 +200,7 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                         }
 
                         if (!tool.isBuiltIn && tool.pipelineStagesJson.isNotBlank() && tool.pipelineStagesJson != "[]") {
-                            Text("11-Stage Pipeline:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            Text("10-Stage Pipeline:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -141,9 +217,11 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                                         color = c.copy(alpha = 0.14f)
                                     ) {
                                         Text(
-                                            text = "${st.stage.take(7)}:${st.status.take(4)}",
+                                            text = "${st.stage.take(8)}:${st.status.take(4)}",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = c,
+                                            maxLines = 1,
+                                            softWrap = false,
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
                                     }
@@ -151,28 +229,49 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                             }
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             when (tool.activationStatus) {
                                 "PROPOSED" -> {
                                     Button(
                                         onClick = { viewModel.runSelfCodingToolCycle(tool.name, tool.toolKind, tool.toolId) },
-                                        enabled = !isBusy
-                                    ) { Text("Run 11-Stage Pipeline") }
+                                        enabled = !isBusy,
+                                        modifier = Modifier.defaultMinSize(minWidth = 112.dp, minHeight = 48.dp)
+                                    ) { Text("Run Pipeline", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                                 }
                                 "WAITING_APPROVAL" -> {
                                     Button(
                                         onClick = { viewModel.requestApproveAndInstallTool(tool) },
-                                        enabled = !isBusy
-                                    ) { Text("Approve & Install") }
+                                        enabled = !isBusy,
+                                        modifier = Modifier.defaultMinSize(minWidth = 118.dp, minHeight = 48.dp)
+                                    ) { Text("Approve & Install", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                                 }
                                 FeatureStatus.IMPLEMENTED_NOT_DEVICE_VERIFIED.name, FeatureStatus.ACTIVE.name -> {
                                     if (tool.toolKind != "BUILT_IN") {
                                         Button(
                                             onClick = { viewModel.verifyAndRunTool(tool, runtimeInput) },
-                                            enabled = !isBusy
-                                        ) { Text("Execute & Verify") }
-                                        OutlinedButton(onClick = { viewModel.rollbackMarketplaceTool(tool) }) {
-                                            Text("Rollback")
+                                            enabled = !isBusy,
+                                            modifier = Modifier.defaultMinSize(minWidth = 118.dp, minHeight = 48.dp)
+                                        ) { Text("Execute & Verify", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+                                        if (tool.autoActivated) {
+                                            OutlinedButton(
+                                                onClick = { viewModel.undoAutoActivatedTool(tool) },
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StatusAmber),
+                                                modifier = Modifier
+                                                    .defaultMinSize(minWidth = 88.dp, minHeight = 48.dp)
+                                                    .testTag("undo_auto_tool_${tool.toolId}")
+                                            ) {
+                                                Text("Undo", maxLines = 1, softWrap = false)
+                                            }
+                                        }
+                                        OutlinedButton(
+                                            onClick = { viewModel.rollbackMarketplaceTool(tool) },
+                                            modifier = Modifier.defaultMinSize(minWidth = 96.dp, minHeight = 48.dp)
+                                        ) {
+                                            Text("Rollback", maxLines = 1, softWrap = false)
                                         }
                                     }
                                 }
@@ -180,14 +279,18 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                                     if (!tool.isBuiltIn) {
                                         OutlinedButton(
                                             onClick = { viewModel.runSelfCodingToolCycle(tool.name, tool.toolKind, tool.toolId) },
-                                            enabled = !isBusy
-                                        ) { Text("Retry Pipeline") }
+                                            enabled = !isBusy,
+                                            modifier = Modifier.defaultMinSize(minWidth = 104.dp, minHeight = 48.dp)
+                                        ) { Text("Retry Pipeline", maxLines = 1, softWrap = false) }
                                     }
                                 }
                             }
                             if (tool.historyLog.isNotBlank()) {
-                                FilledTonalButton(onClick = { showHistory = !showHistory }) {
-                                    Text(if (showHistory) "Hide History" else "History")
+                                FilledTonalButton(
+                                    onClick = { showHistory = !showHistory },
+                                    modifier = Modifier.defaultMinSize(minWidth = 88.dp, minHeight = 48.dp)
+                                ) {
+                                    Text(if (showHistory) "Hide Log" else "History", maxLines = 1, softWrap = false)
                                 }
                             }
                         }
@@ -205,19 +308,22 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                 item {
                     NeuralCard {
                         SectionHeader(
-                            title = "11-Stage Tool Creation Pipeline",
-                            subtitle = "DISCOVER → ASK ADVISORS → DESIGN → CODE → BUILD → TEST → SECURITY → USER APPROVAL → INSTALL → VERIFY → ACTIVATE"
+                            title = "10-Stage Tool Creation Pipeline",
+                            subtitle = "DISCOVER → ASK ADVISORS → DESIGN → CODE → BUILD → TEST → SECURITY SCAN → READY FOR APPROVAL → USER INSTALL → VERIFY"
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             FilterChip(
                                 selected = selectedKind == "DECLARATIVE_JSON",
                                 onClick = { selectedKind = "DECLARATIVE_JSON" },
-                                label = { Text("Safe Declarative JSON") }
+                                label = { Text("Safe Declarative JSON", maxLines = 1, softWrap = false) }
                             )
                             FilterChip(
                                 selected = selectedKind == "KOTLIN_GITHUB_BRANCH",
                                 onClick = { selectedKind = "KOTLIN_GITHUB_BRANCH" },
-                                label = { Text("Kotlin Branch + CI APK") }
+                                label = { Text("Kotlin Branch + CI APK", maxLines = 1, softWrap = false) }
                             )
                         }
                         OutlinedTextField(
@@ -226,21 +332,22 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                             label = { Text("Describe capability or tool to build") },
                             modifier = Modifier.fillMaxWidth().testTag("self_code_goal_input")
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    viewModel.runSelfCodingToolCycle(capabilityGoal, selectedKind)
-                                    capabilityGoal = ""
-                                },
-                                enabled = capabilityGoal.isNotBlank() && !isBusy,
-                                modifier = Modifier.weight(1f).testTag("self_code_run_btn")
-                            ) {
-                                if (isBusy) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.size(8.dp))
-                                }
-                                Text("Build Tool (Stages 1–7)")
+                        Button(
+                            onClick = {
+                                viewModel.runSelfCodingToolCycle(capabilityGoal, selectedKind)
+                                capabilityGoal = ""
+                            },
+                            enabled = capabilityGoal.isNotBlank() && !isBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("self_code_run_btn")
+                        ) {
+                            if (isBusy) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.size(8.dp))
                             }
+                            Text("Build Tool (Stages 1–7)", maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -254,9 +361,11 @@ fun MarketplaceAndSelfImproveScreen(viewModel: TeenaViewModel) {
                         Button(
                             onClick = { viewModel.runSelfImprovementResearchNow() },
                             enabled = !isBusy,
-                            modifier = Modifier.testTag("run_research_cycle_btn")
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 180.dp, minHeight = 48.dp)
+                                .testTag("run_research_cycle_btn")
                         ) {
-                            Text("Run Research Cycle Now (Propose Tools)")
+                            Text("Run Research Cycle Now", maxLines = 1, softWrap = false)
                         }
                     }
                 }

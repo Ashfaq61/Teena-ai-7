@@ -33,6 +33,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
 
     <!-- Targeted App Visibility (Play-compliant alternative to QUERY_ALL_PACKAGES) -->
@@ -47,6 +49,10 @@
         <package android:name="org.telegram.messenger" />
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.google.android.aicore" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.android.settings" />
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.android.vending" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
@@ -79,6 +85,29 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ShareToTeena: Receive shared text or images from external Android apps -->
+        <activity
+            android:name=".ui.ShareToTeenaActivity"
+            android:exported="true"
+            android:label="@string/share_to_teena_label"
+            android:theme="@style/Theme.MyApplication">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
 
@@ -126,10 +155,77 @@
             android:exported="false"
             android:foregroundServiceType="dataSync|microphone" />
 
+        <!-- Trigger Monitor Foreground Service -->
+        <service
+            android:name=".system.TeenaTriggerMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- MediaProjection Screen Share Foreground Service for Teena Rooms -->
+        <service
+            android:name=".system.TeenaScreenShareService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Optional Firebase Cloud Messaging receiver (active only when google-services.json is configured) -->
+        <service
+            android:name=".system.TeenaFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Teena AI InputMethodService Keyboard -->
+        <service
+            android:name=".system.TeenaKeyboardService"
+            android:exported="true"
+            android:label="@string/teena_keyboard_label"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/teena_ime_method" />
+        </service>
+
         <!-- Reminder & Scheduled Task BroadcastReceiver -->
         <receiver
             android:name=".system.TeenaReminderReceiver"
             android:exported="false" />
+
+        <!-- Scheduled Alarm Trigger BroadcastReceiver -->
+        <receiver
+            android:name=".system.TeenaTriggerAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Boot & Package-Replace Receiver to restore enabled alarm triggers and monitor -->
+        <receiver
+            android:name=".system.TeenaBootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Optional Device Admin Receiver (direct mode; user must enable manually) -->
+        <receiver
+            android:name=".system.TeenaDeviceAdminReceiver"
+            android:description="@string/device_admin_description"
+            android:exported="true"
+            android:label="@string/device_admin_label"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
         <!-- FileProvider for Camera captures and backup/report exports -->
         <provider
@@ -142,6 +238,18 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Dedicated SketchFileProvider for saving and sharing drawings -->
+        <provider
+            android:name=".system.SketchFileProvider"
+            android:authorities="${applicationId}.sketchprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/sketch_file_paths" />
+        </provider>
+
     </application>
 
 </manifest>
+

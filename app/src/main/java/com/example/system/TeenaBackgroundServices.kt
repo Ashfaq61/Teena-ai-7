@@ -81,45 +81,171 @@ object TeenaNotificationHelper {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(id, notif)
     }
+
+    private const val SCREEN_WATCH_NOTIF_ID = 4199
+
+    fun showScreenWatchingIndicator(context: Context, goal: String, stepNumber: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        runCatching {
+            ensureChannels(context)
+            val openIntent = Intent(context, MainActivity::class.java)
+            val pending = PendingIntent.getActivity(
+                context,
+                SCREEN_WATCH_NOTIF_ID,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val bodyText = if (stepNumber > 0) {
+                "Step $stepNumber • ${goal.take(80)}"
+            } else {
+                goal.take(100).ifBlank { context.getString(R.string.screen_watching_indicator_body) }
+            }
+            val notif = NotificationCompat.Builder(context, CHANNEL_FOREGROUND)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(context.getString(R.string.screen_watching_indicator_title))
+                .setContentText(bodyText)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(pending)
+                .build()
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(SCREEN_WATCH_NOTIF_ID, notif)
+        }
+    }
+
+    fun clearScreenWatchingIndicator(context: Context) {
+        runCatching {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(SCREEN_WATCH_NOTIF_ID)
+        }
+    }
 }
 
 class TeenaForegroundService : Service() {
     companion object {
         private const val FG_NOTIF_ID = 4101
+        const val ACTION_START_MONITOR = "com.example.teena.ACTION_START_MONITOR"
+        const val ACTION_START_VOICE = "com.example.teena.ACTION_START_VOICE"
+        const val ACTION_STOP_VOICE = "com.example.teena.ACTION_STOP_VOICE"
+
+        @Volatile
+        var onVoiceStopRequested: (() -> Unit)? = null
+
+        @Volatile
+        var isVoiceForegroundActive: Boolean = false
+            private set
 
         fun start(context: Context) {
-            val intent = Intent(context, TeenaForegroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
+            val intent = Intent(context, TeenaForegroundService::class.java).apply {
+                action = ACTION_START_MONITOR
+            }
+            safeStartForeground(context, intent)
+        }
+
+        fun startVoiceMode(context: Context) {
+            val intent = Intent(context, TeenaForegroundService::class.java).apply {
+                action = ACTION_START_VOICE
+            }
+            safeStartForeground(context, intent)
+        }
+
+        fun stopVoiceMode(context: Context, keepMonitorIfEnabled: Boolean) {
+            isVoiceForegroundActive = false
+            if (keepMonitorIfEnabled) {
+                start(context)
             } else {
-                context.startService(intent)
+                runCatching { context.stopService(Intent(context, TeenaForegroundService::class.java)) }
             }
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, TeenaForegroundService::class.java))
+            isVoiceForegroundActive = false
+            runCatching { context.stopService(Intent(context, TeenaForegroundService::class.java)) }
+        }
+
+        private fun safeStartForeground(context: Context, intent: Intent) {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP_VOICE) {
+            isVoiceForegroundActive = false
+            onVoiceStopRequested?.invoke()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val voiceMode = intent?.action == ACTION_START_VOICE
+        isVoiceForegroundActive = voiceMode
         TeenaNotificationHelper.ensureChannels(this)
+
         val openPending = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notif = NotificationCompat.Builder(this, TeenaNotificationHelper.CHANNEL_FOREGROUND)
+
+        val builder = NotificationCompat.Builder(this, TeenaNotificationHelper.CHANNEL_FOREGROUND)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Teena AI Neural Engine Active")
-            .setContentText("Monitoring scheduled tasks, agent health, and voice readiness.")
             .setContentIntent(openPending)
             .setOngoing(true)
-            .build()
-        startForeground(FG_NOTIF_ID, notif)
-        return START_STICKY
+
+        if (voiceMode) {
+            val stopVoiceIntent = Intent(this, TeenaForegroundService::class.java).apply {
+                action = ACTION_STOP_VOICE
+            }
+            val stopPending = PendingIntent.getService(
+                this,
+                4102,
+                stopVoiceIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder
+                .setContentTitle("Teena Live Voice Active")
+                .setContentText("Microphone listening • Tap Stop Voice to disconnect cleanly.")
+                .addAction(0, "Stop Voice", stopPending)
+        } else {
+            builder
+                .setContentTitle("Teena AI Neural Engine Active")
+                .setContentText("Monitoring scheduled tasks, agent health, and voice readiness.")
+        }
+
+        val notif = builder.build()
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val fgType = if (voiceMode) {
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
+                startForeground(FG_NOTIF_ID, notif, fgType)
+            } else {
+                startForeground(FG_NOTIF_ID, notif)
+            }
+        }.onFailure {
+            stopSelf()
+        }
+        return if (voiceMode) START_NOT_STICKY else START_STICKY
+    }
+
+    override fun onDestroy() {
+        isVoiceForegroundActive = false
+        super.onDestroy()
     }
 }
 
@@ -166,7 +292,10 @@ data class PermissionSnapshot(
     val accessibilityEnabled: Boolean,
     val notificationListenerEnabled: Boolean,
     val writeSettingsAllowed: Boolean,
-    val isDefaultDialer: Boolean
+    val isDefaultDialer: Boolean,
+    val teenaKeyboardEnabled: Boolean = false,
+    val teenaKeyboardSelected: Boolean = false,
+    val deviceAdminActive: Boolean = false
 )
 
 class PermissionStatusManager(private val context: Context) {
@@ -195,8 +324,12 @@ class PermissionStatusManager(private val context: Context) {
             postNotifications = notifPerm,
             accessibilityEnabled = TeenaAccessibilityService.isAccessibilityEnabledInSettings(context),
             notificationListenerEnabled = TeenaNotificationListenerService.isEnabledInSettings(context),
-            writeSettingsAllowed = android.provider.Settings.System.canWrite(context),
-            isDefaultDialer = PhoneCallEngine(context).isDefaultDialer()
+            writeSettingsAllowed = runCatching { android.provider.Settings.System.canWrite(context) }.getOrDefault(false),
+            isDefaultDialer = PhoneCallEngine(context).isDefaultDialer(),
+            teenaKeyboardEnabled = TeenaKeyboardService.isKeyboardEnabled(context),
+            teenaKeyboardSelected = TeenaKeyboardService.isKeyboardSelected(context),
+            deviceAdminActive = TeenaDeviceAdminReceiver.isAdminActive(context)
         )
     }
 }
+

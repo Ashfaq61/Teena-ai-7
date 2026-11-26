@@ -12,9 +12,10 @@ data class DeclarativeToolSpec(
     val toolName: String,
     val category: String,
     val description: String,
-    val actionType: String, // WEB_API_JSON_QUERY, GITHUB_REPO_INSPECTOR, HF_MODEL_QUERY, TEXT_TRANSFORM_TEMPLATE, KNOWLEDGE_LOOKUP
+    val actionType: String, // TEXT_TRANSFORM_TEMPLATE, JSON_FORMATTER, UNIT_CONVERTER, REGEX_EXTRACTOR, WEB_API_JSON_QUERY, GITHUB_REPO_INSPECTOR, HF_MODEL_QUERY, KNOWLEDGE_LOOKUP
     val endpointOrTarget: String,
-    val licenseSpdx: String = "Apache-2.0"
+    val licenseSpdx: String = "Apache-2.0",
+    val permissionsRequired: List<String> = emptyList()
 )
 
 data class ToolExecutionResult(
@@ -32,6 +33,14 @@ class SafeToolInterpreter(
     private val network: TeenaNetworkClients,
     private val emergencyStopController: EmergencyStopController
 ) {
+    companion object {
+        val OFFLINE_ZERO_PERM_ACTION_TYPES = setOf(
+            "TEXT_TRANSFORM_TEMPLATE",
+            "JSON_FORMATTER",
+            "UNIT_CONVERTER",
+            "REGEX_EXTRACTOR"
+        )
+    }
 
     fun parseSpec(rawSpec: String): Result<DeclarativeToolSpec> = runCatching {
         val trimmed = rawSpec.trim()
@@ -46,23 +55,37 @@ class SafeToolInterpreter(
             .ifBlank { obj.optString("target") }
             .trim()
         if (actionType.isBlank()) throw IllegalArgumentException("Declarative tool spec missing 'actionType'.")
+        val perms = buildList {
+            val arr = obj.optJSONArray("permissionsRequired") ?: obj.optJSONArray("permissions")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val p = arr.optString(i).trim()
+                    if (p.isNotBlank()) add(p)
+                }
+            } else {
+                val single = obj.optString("permissionsRequired").ifBlank { obj.optString("permission") }.trim()
+                if (single.isNotBlank() && !single.equals("none", ignoreCase = true)) {
+                    single.split(",").map { it.trim() }.filter { it.isNotBlank() }.forEach { add(it) }
+                }
+            }
+        }
         DeclarativeToolSpec(
             toolName = obj.optString("toolName", "Custom Tool").trim(),
             category = obj.optString("category", "Custom").trim(),
             description = obj.optString("description", "").trim(),
             actionType = actionType,
             endpointOrTarget = endpoint,
-            licenseSpdx = obj.optString("licenseSpdx", "Apache-2.0").trim().ifBlank { "Apache-2.0" }
+            licenseSpdx = obj.optString("licenseSpdx", "Apache-2.0").trim().ifBlank { "Apache-2.0" },
+            permissionsRequired = perms
         )
     }
 
     suspend fun dryRunTest(spec: DeclarativeToolSpec, sampleInput: String = "kotlin android"): Result<String> = runCatching {
-        val allowedTypes = setOf(
+        val allowedTypes = OFFLINE_ZERO_PERM_ACTION_TYPES + setOf(
             "WEB_API_JSON_QUERY",
             "WEB_API",
             "GITHUB_REPO_INSPECTOR",
             "HF_MODEL_QUERY",
-            "TEXT_TRANSFORM_TEMPLATE",
             "KNOWLEDGE_LOOKUP",
             "ACCESSIBILITY_MACRO",
             "DEEP_LINK"
@@ -76,6 +99,7 @@ class SafeToolInterpreter(
                 put("toolName", spec.toolName)
                 put("actionType", spec.actionType)
                 put("endpointOrTarget", spec.endpointOrTarget)
+                put("permissionsRequired", spec.permissionsRequired.joinToString(","))
             }.toString(),
             licenseSpdx = spec.licenseSpdx,
             targetUrl = spec.endpointOrTarget.takeIf { it.startsWith("http", ignoreCase = true) }
@@ -83,11 +107,27 @@ class SafeToolInterpreter(
         if (!scan.passed) {
             throw SecurityException(scan.findings.joinToString("; "))
         }
-        if (spec.actionType == "TEXT_TRANSFORM_TEMPLATE") {
-            val rendered = executeTemplate(spec.endpointOrTarget, sampleInput)
-            return@runCatching "Dry-run template test OK (${rendered.length} chars)"
+        when (spec.actionType) {
+            "TEXT_TRANSFORM_TEMPLATE" -> {
+                val rendered = executeTemplate(spec.endpointOrTarget, sampleInput)
+                "Dry-run template test OK (${rendered.length} chars)"
+            }
+            "JSON_FORMATTER" -> {
+                val sampleJson = """{"tool":"${spec.toolName}","sample":"${sampleInput.take(24)}"}"""
+                val formatted = formatJsonSafely(sampleJson)
+                "Dry-run JSON formatter OK (${formatted.lines().size} lines)"
+            }
+            "UNIT_CONVERTER" -> {
+                val converted = convertUnitsSafely(spec.endpointOrTarget.ifBlank { "km_to_mi" }, "10")
+                "Dry-run unit converter OK ($converted)"
+            }
+            "REGEX_EXTRACTOR" -> {
+                val pattern = spec.endpointOrTarget.ifBlank { "[A-Za-z0-9_]+" }
+                val matched = extractRegexSafely(pattern, sampleInput)
+                "Dry-run regex extractor OK ($matched)"
+            }
+            else -> "Declarative spec schema & safety verification OK (actionType=${spec.actionType})"
         }
-        "Declarative spec schema & safety verification OK (actionType=${spec.actionType})"
     }
 
     suspend fun executeTool(tool: MarketplaceToolEntity, input: String): ToolExecutionResult {
@@ -134,12 +174,11 @@ class SafeToolInterpreter(
                     val fetched = network.fetchReadableWebPage(finalUrl).getOrThrow()
                     UntrustedContentSanitizer.wrapAsUntrustedData("tool:${tool.toolId}", fetched, 2200)
                 }
-                "TEXT_TRANSFORM_TEMPLATE" -> {
-                    executeTemplate(spec.endpointOrTarget, input)
-                }
-                else -> {
-                    "Executed declarative action ${spec.actionType} targeting '${spec.endpointOrTarget}'."
-                }
+                "TEXT_TRANSFORM_TEMPLATE" -> executeTemplate(spec.endpointOrTarget, input)
+                "JSON_FORMATTER" -> formatJsonSafely(input)
+                "UNIT_CONVERTER" -> convertUnitsSafely(spec.endpointOrTarget, input)
+                "REGEX_EXTRACTOR" -> extractRegexSafely(spec.endpointOrTarget, input)
+                else -> "Executed declarative action ${spec.actionType} targeting '${spec.endpointOrTarget}'."
             }
             ToolExecutionResult(
                 succeeded = true,
@@ -162,6 +201,32 @@ class SafeToolInterpreter(
         } else {
             "$template: $cleanInput"
         }
+    }
+
+    private fun formatJsonSafely(raw: String): String {
+        val candidate = raw.trim().ifBlank { """{"status":"ok"}""" }
+        val jsonStr = extractFirstJsonObject(candidate)
+        return JSONObject(jsonStr).toString(2)
+    }
+
+    private fun convertUnitsSafely(mode: String, input: String): String {
+        val num = Regex("""-?\d+(\.\d+)?""").find(input)?.value?.toDoubleOrNull() ?: 1.0
+        return when (mode.lowercase()) {
+            "km_to_mi" -> "${"%.2f".format(num)} km = ${"%.2f".format(num * 0.621371)} mi"
+            "mi_to_km" -> "${"%.2f".format(num)} mi = ${"%.2f".format(num * 1.60934)} km"
+            "c_to_f" -> "${"%.1f".format(num)} °C = ${"%.1f".format((num * 9.0 / 5.0) + 32.0)} °F"
+            "f_to_c" -> "${"%.1f".format(num)} °F = ${"%.1f".format((num - 32.0) * 5.0 / 9.0)} °C"
+            "kg_to_lb" -> "${"%.2f".format(num)} kg = ${"%.2f".format(num * 2.20462)} lb"
+            "mb_to_gb" -> "${"%.2f".format(num)} MB = ${"%.3f".format(num / 1024.0)} GB"
+            else -> "${"%.2f".format(num)} ($mode) -> ${"%.2f".format(num * 0.621371)} converted"
+        }
+    }
+
+    private fun extractRegexSafely(pattern: String, input: String): String {
+        val safePattern = pattern.ifBlank { "[A-Za-z0-9_]+" }.take(120)
+        val regex = Regex(safePattern)
+        val matches = regex.findAll(input.ifBlank { "sample" }).map { it.value }.take(20).toList()
+        return if (matches.isEmpty()) "No matches for /$safePattern/" else matches.joinToString(", ")
     }
 
     private fun extractFirstJsonObject(raw: String): String {

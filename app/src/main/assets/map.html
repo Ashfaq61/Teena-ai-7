@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Teena Maps</title>
+<style>
+  :root {
+    --bg: #08101c;
+    --panel: rgba(13, 24, 41, 0.90);
+    --border: rgba(56, 189, 248, 0.35);
+    --accent: #38bdf8;
+    --mint: #34d399;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    touch-action: none;
+  }
+  #mapCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: grab;
+  }
+  #hudTop {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 8px 12px;
+    backdrop-filter: blur(8px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+  }
+  #coordLabel {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  #statusSub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  #controls {
+    position: fixed;
+    right: 12px;
+    bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .btn:active { background: rgba(56, 189, 248, 0.25); }
+</style>
+</head>
+<body>
+<canvas id="mapCanvas"></canvas>
+<div id="hudTop">
+  <div>
+    <div id="coordLabel">Teena Interactive Map • 31.5204, 74.3587</div>
+    <div id="statusSub">Location permission optional • Drag to pan, +/- to zoom</div>
+  </div>
+</div>
+<div id="controls">
+  <button class="btn" type="button" onclick="window.TeenaMap.zoomIn()" aria-label="Zoom In">+</button>
+  <button class="btn" type="button" onclick="window.TeenaMap.zoomOut()" aria-label="Zoom Out">−</button>
+  <button class="btn" type="button" onclick="window.TeenaMap.recenter()" aria-label="Recenter">◎</button>
+</div>
+<script>
+(function () {
+  const canvas = document.getElementById('mapCanvas');
+  const ctx = canvas.getContext('2d');
+  const coordLabel = document.getElementById('coordLabel');
+  const statusSub = document.getElementById('statusSub');
+
+  const state = {
+    lat: 31.5204,
+    lng: 74.3587,
+    pinLat: 31.5204,
+    pinLng: 74.3587,
+    accuracyMeters: 0,
+    label: 'Default Center (Optional GPS)',
+    zoom: 13,
+    tileCache: new Map(),
+    tilesAttempted: false,
+    dragging: false,
+    lastX: 0,
+    lastY: 0
+  };
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function lon2tile(lon, zoom) {
+    return ((lon + 180) / 360) * Math.pow(2, zoom);
+  }
+
+  function lat2tile(lat, zoom) {
+    const rad = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, zoom);
+  }
+
+  function tile2lon(x, zoom) {
+    return (x / Math.pow(2, zoom)) * 360 - 180;
+  }
+
+  function tile2lat(y, zoom) {
+    const n = Math.PI - (2 * Math.PI * y) / Math.pow(2, zoom);
+    return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  }
+
+  function getOsmTile(z, x, y) {
+    const n = Math.pow(2, z);
+    const wrappedX = ((x % n) + n) % n;
+    if (y < 0 || y >= n) return null;
+    const key = z + '/' + wrappedX + '/' + y;
+    const cached = state.tileCache.get(key);
+    if (cached) return cached;
+
+    const entry = { img: new Image(), loaded: false, failed: false };
+    entry.img.crossOrigin = 'anonymous';
+    entry.img.onload = function () {
+      entry.loaded = true;
+      draw();
+    };
+    entry.img.onerror = function () {
+      entry.failed = true;
+    };
+    entry.img.src = 'https://tile.openstreetmap.org/' + z + '/' + wrappedX + '/' + y + '.png';
+    state.tileCache.set(key, entry);
+    return entry;
+  }
+
+  function drawOfflineGrid(w, h, centerTx, centerTy, tileSize) {
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#091426');
+    grad.addColorStop(1, '#0d1b32');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.14)';
+    ctx.lineWidth = 1;
+    const step = 48;
+    const offsetX = ((-centerTx * tileSize) % step + step) % step;
+    const offsetY = ((-centerTy * tileSize) % step + step) % step;
+    for (let x = offsetX; x < w; x += step) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+    for (let y = offsetY; y < h; y += step) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+  }
+
+  function draw() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const tileSize = 256;
+    const centerTx = lon2tile(state.lng, state.zoom);
+    const centerTy = lat2tile(state.lat, state.zoom);
+
+    drawOfflineGrid(w, h, centerTx, centerTy, tileSize);
+
+    const startX = Math.floor(centerTx - w / (2 * tileSize)) - 1;
+    const endX = Math.ceil(centerTx + w / (2 * tileSize)) + 1;
+    const startY = Math.floor(centerTy - h / (2 * tileSize)) - 1;
+    const endY = Math.ceil(centerTy + h / (2 * tileSize)) + 1;
+
+    for (let tx = startX; tx <= endX; tx++) {
+      for (let ty = startY; ty <= endY; ty++) {
+        const entry = getOsmTile(state.zoom, tx, ty);
+        if (entry && entry.loaded) {
+          const px = (tx - centerTx) * tileSize + w / 2;
+          const py = (ty - centerTy) * tileSize + h / 2;
+          ctx.globalAlpha = 0.86;
+          ctx.drawImage(entry.img, px, py, tileSize, tileSize);
+          ctx.globalAlpha = 1.0;
+        }
+      }
+    }
+
+    // Draw pin marker
+    const pinTx = lon2tile(state.pinLng, state.zoom);
+    const pinTy = lat2tile(state.pinLat, state.zoom);
+    const pinX = (pinTx - centerTx) * tileSize + w / 2;
+    const pinY = (pinTy - centerTy) * tileSize + h / 2;
+
+    if (state.accuracyMeters > 0) {
+      ctx.beginPath();
+      ctx.arc(pinX, pinY, 28, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(52, 211, 153, 0.18)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.arc(pinX, pinY, 10, 0, Math.PI * 2);
+    ctx.fillStyle = '#38bdf8';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
+    const textWidth = Math.min(240, ctx.measureText(state.label).width + 20);
+    ctx.fillRect(pinX - textWidth / 2, pinY - 36, textWidth, 20);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '600 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.label.slice(0, 32), pinX, pinY - 22);
+
+    coordLabel.textContent = state.label + ' • ' + state.pinLat.toFixed(4) + ', ' + state.pinLng.toFixed(4);
+    statusSub.textContent = 'Zoom ' + state.zoom + (state.accuracyMeters > 0 ? (' • GPS ±' + Math.round(state.accuracyMeters) + 'm') : ' • Optional GPS');
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    state.dragging = true;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    if (!state.dragging) return;
+    const dx = e.clientX - state.lastX;
+    const dy = e.clientY - state.lastY;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+    const tileSize = 256;
+    const cx = lon2tile(state.lng, state.zoom) - dx / tileSize;
+    const cy = lat2tile(state.lat, state.zoom) - dy / tileSize;
+    state.lng = tile2lon(cx, state.zoom);
+    state.lat = Math.max(-85, Math.min(85, tile2lat(cy, state.zoom)));
+    draw();
+  });
+  canvas.addEventListener('pointerup', function () { state.dragging = false; });
+  canvas.addEventListener('pointercancel', function () { state.dragging = false; });
+
+  window.TeenaMap = {
+    setLocation: function (lat, lng, accuracyMeters, label) {
+      if (typeof lat === 'number' && typeof lng === 'number') {
+        state.lat = lat;
+        state.lng = lng;
+        state.pinLat = lat;
+        state.pinLng = lng;
+        state.accuracyMeters = typeof accuracyMeters === 'number' ? accuracyMeters : 0;
+        if (label) state.label = String(label);
+        state.zoom = Math.max(state.zoom, 14);
+        draw();
+      }
+    },
+    setSearchFocus: function (label, lat, lng) {
+      if (label) state.label = String(label);
+      if (typeof lat === 'number' && typeof lng === 'number') {
+        state.lat = lat;
+        state.lng = lng;
+        state.pinLat = lat;
+        state.pinLng = lng;
+      }
+      draw();
+    },
+    zoomIn: function () {
+      state.zoom = Math.min(18, state.zoom + 1);
+      draw();
+    },
+    zoomOut: function () {
+      state.zoom = Math.max(2, state.zoom - 1);
+      draw();
+    },
+    recenter: function () {
+      state.lat = state.pinLat;
+      state.lng = state.pinLng;
+      draw();
+    }
+  };
+
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>

@@ -3,10 +3,17 @@ package com.example.core
 import android.content.Context
 import com.example.ai.AiBrainEngine
 import com.example.ai.ExternalAgentHub
+import com.example.ai.LiveSocialTaskDriver
+import com.example.ai.LyriaMusicEngine
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
 import com.example.ai.SafeToolInterpreter
+import com.example.ai.ScreenVisionAgentEngine
+import com.example.ai.SocialTaskEngine
+import com.example.ai.TeenaLiveKitRoomController
 import com.example.ai.ToolCreationPipelineEngine
+import com.example.ai.VoiceRoomConnectorEngine
+import com.example.ai.WebsiteForgeEngine
 import com.example.core.security.EmergencyStopController
 import com.example.core.security.KeystoreSecretVault
 import com.example.core.security.OriginalCodeVaultManager
@@ -20,6 +27,8 @@ import com.example.system.MapsLocationEngine
 import com.example.system.PermissionStatusManager
 import com.example.system.PhoneCallEngine
 import com.example.system.SocialAutomationEngine
+import com.example.system.TeenaFirebaseBridge
+import com.example.system.TeenaSpeechHelper
 
 class TeenaServiceContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -43,6 +52,24 @@ class TeenaServiceContainer(context: Context) {
     val documentEngine: DocumentKnowledgeEngine by lazy { DocumentKnowledgeEngine(appContext) }
     val apkBuildEngine: ApkBuildEngine by lazy { ApkBuildEngine(appContext) }
     val originalCodeVaultManager: OriginalCodeVaultManager by lazy { OriginalCodeVaultManager(appContext) }
+    val voiceRoomConnector: VoiceRoomConnectorEngine by lazy {
+        VoiceRoomConnectorEngine(networkClients.httpClient, emergencyStopController)
+    }
+    val liveKitRoomController: TeenaLiveKitRoomController by lazy {
+        TeenaLiveKitRoomController(appContext, emergencyStopController)
+    }
+    val firebaseBridge: TeenaFirebaseBridge by lazy {
+        TeenaFirebaseBridge(appContext)
+    }
+    val lyriaMusicEngine: LyriaMusicEngine by lazy {
+        LyriaMusicEngine(appContext, networkClients.httpClient, emergencyStopController)
+    }
+    val websiteForgeEngine: WebsiteForgeEngine by lazy {
+        WebsiteForgeEngine(appContext)
+    }
+    val speechHelper: TeenaSpeechHelper by lazy {
+        TeenaSpeechHelper(appContext)
+    }
 
     val aiBrain: AiBrainEngine by lazy {
         AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController)
@@ -56,6 +83,27 @@ class TeenaServiceContainer(context: Context) {
         SafeToolInterpreter(networkClients, emergencyStopController)
     }
 
+    val screenVisionAgent: ScreenVisionAgentEngine by lazy {
+        ScreenVisionAgentEngine(
+            context = appContext,
+            db = database,
+            aiBrain = aiBrain,
+            emergencyStopController = emergencyStopController
+        )
+    }
+
+    val socialTaskEngine: SocialTaskEngine by lazy {
+        SocialTaskEngine(
+            db = database,
+            emergencyStopController = emergencyStopController,
+            driver = LiveSocialTaskDriver(
+                context = appContext,
+                socialEngine = socialEngine,
+                phoneEngine = phoneEngine
+            )
+        )
+    }
+
     val toolPipelineEngine: ToolCreationPipelineEngine by lazy {
         ToolCreationPipelineEngine(
             db = database,
@@ -65,7 +113,8 @@ class TeenaServiceContainer(context: Context) {
             network = networkClients,
             vault = vault,
             prefs = preferences,
-            emergencyStopController = emergencyStopController
+            emergencyStopController = emergencyStopController,
+            appContext = appContext
         )
     }
 

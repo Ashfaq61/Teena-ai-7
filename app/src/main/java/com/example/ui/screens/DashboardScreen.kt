@@ -21,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.HealthAndSafety
+import androidx.compose.material.icons.filled.MeetingRoom
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.TouchApp
@@ -45,7 +47,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.ai.TeenaIdentityEngine
 import com.example.data.local.FeatureStatus
+import com.example.data.local.toIdentityProfile
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
 import com.example.ui.theme.NeuralViolet
@@ -126,16 +130,26 @@ fun DashboardScreen(
                             .clip(CircleShape),
                         contentScale = ContentScale.Crop
                     )
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onNavigate("identity") }
+                    ) {
+                        val activePreset = TeenaIdentityEngine.presetFor(settings.personalityId)
                         Text(
                             text = "TEENA AI",
                             style = MaterialTheme.typography.headlineMedium,
                             color = NeuralCyan
                         )
                         Text(
-                            text = "Honest Multi-Agent & Advisor Core",
+                            text = TeenaIdentityEngine.buildPersonalizedGreeting(settings.toIdentityProfile()),
                             style = MaterialTheme.typography.titleSmall,
                             color = Color.White
+                        )
+                        Text(
+                            text = "Voice: ${settings.selectedVoice} • Persona: ${activePreset.title} (Tap to customize)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NeuralMint
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         StatusPill(
@@ -325,6 +339,34 @@ fun DashboardScreen(
                     Icon(Icons.Default.HealthAndSafety, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(6.dp))
                     Text("Run Self-Test")
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = { onNavigate("music_studio") },
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("dash_music_studio_btn")
+                ) {
+                    Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text("Music Studio")
+                }
+                FilledTonalButton(
+                    onClick = { onNavigate("voice_rooms") },
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("dash_voice_rooms_btn")
+                ) {
+                    Icon(Icons.Default.MeetingRoom, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text("Voice Rooms")
                 }
             }
         }

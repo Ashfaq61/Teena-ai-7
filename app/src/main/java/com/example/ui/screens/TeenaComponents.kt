@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.local.FeatureStatus
@@ -69,14 +70,18 @@ fun StatusPill(
     val (bg, fg) = when {
         upper in setOf("ACTIVE", "VERIFIED", "SUCCESS", "COMPLETED", "PASSED", "READY") ->
             NeuralMint.copy(alpha = 0.16f) to NeuralMint
-        upper in setOf("PARTIAL", "WORKING", "CONNECTING", "RECONNECTING", "RUNNING", "LISTENING", "SPEAKING", "THINKING", "WAITING_APPROVAL", "PROPOSED") ->
+        upper in setOf(
+            "PARTIAL", "WORKING", "CONNECTING", "RECONNECTING", "RUNNING",
+            "LISTENING", "SPEAKING", "THINKING", "WAITING_APPROVAL", "PROPOSED",
+            "WAITING_FOR_CONFIRMATION", "WAITING_FOR_USER", "SUBMITTED_UNVERIFIED"
+        ) ->
             StatusAmber.copy(alpha = 0.18f) to StatusAmber
         upper in setOf("BLOCKED", "FAILED", "ERROR", "DENIED", "HALTED", "STOPPED", "EMERGENCY_STOP", "ROLLED_BACK") ->
             StatusCrimson.copy(alpha = 0.18f) to StatusCrimson
         else -> NeuralCyan.copy(alpha = 0.15f) to NeuralCyan
     }
     Surface(
-        modifier = modifier,
+        modifier = modifier.semantics(mergeDescendants = true) {},
         shape = RoundedCornerShape(50),
         color = bg,
         border = BorderStroke(1.dp, fg.copy(alpha = 0.45f))

@@ -6,4 +6,14 @@
     <string name="foreground_channel_name">Teena Background Engine</string>
     <string name="alerts_channel_name">Teena Alerts &amp; Reminders</string>
     <string name="builds_channel_name">Teena Build &amp; Research Updates</string>
+    <string name="screen_watching_indicator_title">Teena screen dekh rahi hai</string>
+    <string name="screen_watching_indicator_body">Screen Vision &amp; Accessibility automation active (Emergency Stop se foran rokein).</string>
+    <string name="share_to_teena_label">Share to Teena</string>
+    <string name="teena_keyboard_label">Teena AI Keyboard</string>
+    <string name="trigger_monitor_channel_name">Teena Trigger Monitor</string>
+    <string name="device_admin_label">Teena Device Admin (Optional)</string>
+    <string name="device_admin_description">Optional user-enabled administrator access allowing Teena AI to lock the device screen when explicitly requested.</string>
+    <string name="screen_share_notif_title">Teena Screen Share Active</string>
+    <string name="screen_share_notif_body">Sharing device screen in LiveKit room. Tap Stop Share anytime.</string>
 </resources>
+

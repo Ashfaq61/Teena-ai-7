@@ -20,13 +20,20 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MeetingRoom
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
@@ -35,6 +42,7 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Web
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -60,6 +68,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
+import com.example.ai.TeenaIdentityEngine
+import com.example.data.local.toIdentityProfile
 import com.example.system.TeenaAccessibilityService
 import com.example.system.TeenaNotificationListenerService
 import com.example.ui.theme.NeuralCyan
@@ -85,8 +95,15 @@ fun HubDirectoryScreen(onNavigate: (String) -> Unit) {
         HubTile("api_manager", "API Manager", "Gemini, Groq, OpenRouter & Keystore", Icons.Default.Key),
         HubTile("memory", "Memory & History", "Long-term knowledge & SAF Backups", Icons.Default.History),
         HubTile("build_center", "APK Build Center", "Signed APK check & GitHub Actions", Icons.Default.Build),
-        HubTile("notifications", "Notifications", "Listener feed & Scheduled Reminders", Icons.Default.Notifications),
+        HubTile("notifications", "Notifications", "WhatsApp reader, read aloud & reminders", Icons.Default.Notifications),
+        HubTile("triggers", "Triggers & Keyboard", "Alarm/Boot triggers, monitor & Teena IME", Icons.Default.Alarm),
         HubTile("permissions", "Permissions", "Live OS permission & service status", Icons.Default.Security),
+        HubTile("identity", "Identity & Persona", "Teena personalities & your user profile", Icons.Default.AutoAwesome),
+        HubTile("voice_rooms", "Voice Rooms", "LiveKit token connector & audio rooms", Icons.Default.MeetingRoom),
+        HubTile("music_studio", "Music Studio", "Lyria 3 clips (30s) & full tracks", Icons.Default.MusicNote),
+        HubTile("website_forge", "Website Forge", "Live HTML5 & WebGL 3D site preview", Icons.Default.Web),
+        HubTile("maps", "Interactive Maps", "map.html WebView & optional GPS", Icons.Default.Map),
+        HubTile("sketch", "Sketch Pad", "Draw, save & share via SketchFileProvider", Icons.Default.Draw),
         HubTile("settings", "Settings", "Voice, failover, privacy & services", Icons.Default.Settings),
         HubTile("about", "About Teena", "Architecture & honest status report", Icons.Default.Info)
     )
@@ -190,30 +207,80 @@ fun MemoryAndHistoryScreen(viewModel: TeenaViewModel) {
 }
 
 @Composable
-fun NotificationsAndRemindersScreen(viewModel: TeenaViewModel) {
+fun NotificationsAndRemindersScreen(
+    viewModel: TeenaViewModel,
+    onOpenTriggers: () -> Unit = {}
+) {
     val context = LocalContext.current
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
+    val whatsappNotifications by viewModel.whatsappNotifications.collectAsStateWithLifecycle()
     val reminders by viewModel.reminders.collectAsStateWithLifecycle()
     val listenerBound by viewModel.notificationListenerConnected.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val isSpeaking by viewModel.isTtsSpeaking.collectAsStateWithLifecycle()
 
     var remTitle by remember { mutableStateOf("") }
     var remDelayMin by remember { mutableStateOf("15") }
     var remLocation by remember { mutableStateOf("") }
     var replyDraft by remember { mutableStateOf("") }
+    var whatsappFilterOnly by remember { mutableStateOf(true) }
+
+    val displayedNotifications = if (whatsappFilterOnly) whatsappNotifications else notifications
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("notifications_list"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             NeuralCard {
                 SectionHeader(
-                    title = "Notification Listener & Replies",
+                    title = "WhatsApp Reader & Notification Listener",
                     trailing = { StatusPill(if (listenerBound) "ACTIVE" else "PARTIAL") }
                 )
+                SettingToggleRow(
+                    title = "Read WhatsApp Notifications",
+                    desc = "User-controlled capture of incoming WhatsApp messages (read aloud only when requested)",
+                    checked = settings.whatsappNotifReaderEnabled
+                ) { viewModel.toggleWhatsAppNotifReader(it) }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilledTonalButton(
+                        onClick = { viewModel.readWhatsAppNotificationsAloud() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("whatsapp_read_aloud_btn")
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Read WhatsApp Aloud")
+                    }
+                    if (isSpeaking) {
+                        OutlinedButton(
+                            onClick = { viewModel.stopReadAloud() },
+                            modifier = Modifier.minimumInteractiveComponentSize()
+                        ) {
+                            Text("Stop")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onOpenTriggers,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("open_triggers_from_notif_btn")
+                        ) {
+                            Text("Triggers")
+                        }
+                    }
+                }
                 if (!listenerBound) {
-                    Text("Grant Notification Access so Teena can detect important alerts and prepare authorized replies.", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "Grant Notification Access so Teena can capture WhatsApp alerts & prepare authorized replies.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Button(onClick = { TeenaNotificationListenerService.openNotificationListenerSettings(context) }) {
                         Text("Open Notification Access Settings")
                     }
@@ -249,11 +316,28 @@ fun NotificationsAndRemindersScreen(viewModel: TeenaViewModel) {
 
         item {
             SectionHeader(
-                title = "Captured Notifications (${notifications.size})",
+                title = "Captured Notifications (${displayedNotifications.size})",
                 subtitle = "Notification text is strictly isolated as passive <untrusted_data> (never executed as commands)"
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = whatsappFilterOnly,
+                    onClick = { whatsappFilterOnly = true },
+                    label = { Text("WhatsApp (${whatsappNotifications.size})") }
+                )
+                FilterChip(
+                    selected = !whatsappFilterOnly,
+                    onClick = { whatsappFilterOnly = false },
+                    label = { Text("All (${notifications.size})") }
+                )
+                if (notifications.isNotEmpty()) {
+                    OutlinedButton(onClick = { viewModel.clearCapturedNotifications() }) {
+                        Text("Clear")
+                    }
+                }
+            }
         }
-        if (notifications.isNotEmpty()) {
+        if (displayedNotifications.isNotEmpty()) {
             item {
                 OutlinedTextField(
                     value = replyDraft,
@@ -263,11 +347,18 @@ fun NotificationsAndRemindersScreen(viewModel: TeenaViewModel) {
                 )
             }
         }
-        items(notifications, key = { it.id }) { n ->
+        items(displayedNotifications, key = { it.id }) { n ->
             NeuralCard {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text("${n.appLabel}: ${n.title}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                     if (n.isImportant) StatusPill("IMPORTANT")
+                    IconButton(onClick = { viewModel.readWhatsAppNotificationsAloud(n) }) {
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Read notification aloud")
+                    }
                 }
                 Text(n.text, style = MaterialTheme.typography.bodySmall)
                 if (n.hasReplyAction && replyDraft.isNotBlank()) {
@@ -332,6 +423,8 @@ fun PermissionsScreen(viewModel: TeenaViewModel) {
             "Notifications (POST_NOTIFICATIONS)" to perms.postNotifications,
             "Accessibility Service" to perms.accessibilityEnabled,
             "Notification Listener Service" to perms.notificationListenerEnabled,
+            "Teena AI Keyboard Enabled" to perms.teenaKeyboardEnabled,
+            "Device Admin (Optional, Manual)" to perms.deviceAdminActive,
             "Modify System Settings (Brightness)" to perms.writeSettingsAllowed,
             "Default Phone / InCall Role" to perms.isDefaultDialer
         )
@@ -353,16 +446,26 @@ fun PermissionsScreen(viewModel: TeenaViewModel) {
                 FilledTonalButton(onClick = { TeenaNotificationListenerService.openNotificationListenerSettings(context) }, modifier = Modifier.weight(1f)) {
                     Text("Notif Listener")
                 }
+                FilledTonalButton(onClick = { com.example.system.TeenaKeyboardService.openInputMethodSettings(context) }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Keyboard, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.size(4.dp))
+                    Text("Keyboard")
+                }
             }
         }
     }
 }
 
 @Composable
-fun SettingsScreen(viewModel: TeenaViewModel) {
+fun SettingsScreen(
+    viewModel: TeenaViewModel,
+    onOpenIdentity: () -> Unit = {}
+) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val emergencyStopped by viewModel.isEmergencyStopped.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+    val identityProfile = settings.toIdentityProfile()
+    val activePreset = TeenaIdentityEngine.presetFor(settings.personalityId)
 
     val lastRunFormatted = remember(settings.lastSelfImproveRunAt) {
         if (settings.lastSelfImproveRunAt <= 0L) "Never run yet"
@@ -374,6 +477,116 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Teena Personality & User Identity",
+                    subtitle = TeenaIdentityEngine.buildPersonalizedGreeting(identityProfile),
+                    trailing = { StatusPill(activePreset.title) }
+                )
+                PersonalityPresetStrip(
+                    selectedPersonalityId = settings.personalityId,
+                    onSelect = { viewModel.selectPersonality(it) }
+                )
+                OutlinedButton(
+                    onClick = onOpenIdentity,
+                    modifier = Modifier.fillMaxWidth().minimumInteractiveComponentSize().testTag("settings_open_identity_btn")
+                ) {
+                    Text("Edit Name, Addressing & Custom Tone")
+                }
+            }
+        }
+
+        item {
+            var roomsUrl by remember(settings.voiceRoomsServerUrl) { mutableStateOf(settings.voiceRoomsServerUrl) }
+            var tokenUrl by remember(settings.liveKitTokenEndpoint) { mutableStateOf(settings.liveKitTokenEndpoint) }
+            var wsUrl by remember(settings.liveKitWsUrl) { mutableStateOf(settings.liveKitWsUrl) }
+            val firebaseState by viewModel.firebaseAuthState.collectAsStateWithLifecycle()
+            val configured = com.example.ai.VoiceRoomConnectorEngine.isValidHttpEndpoint(settings.voiceRoomsServerUrl) ||
+                com.example.ai.VoiceRoomConnectorEngine.isValidHttpEndpoint(settings.liveKitTokenEndpoint) ||
+                com.example.ai.VoiceRoomConnectorEngine.isValidWsEndpoint(settings.liveKitWsUrl)
+            NeuralCard {
+                SectionHeader(
+                    title = "Voice/Video Rooms & LiveKit Endpoints",
+                    subtitle = "Optional external endpoints & Firebase Auth/FCM (app runs normally when disabled)",
+                    trailing = {
+                        StatusPill(
+                            if (configured) "READY" else "DISABLED",
+                            modifier = Modifier.testTag("settings_voice_rooms_status_pill")
+                        )
+                    }
+                )
+                OutlinedTextField(
+                    value = roomsUrl,
+                    onValueChange = { roomsUrl = it },
+                    label = { Text("Rooms Server URL (https://...)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_rooms_url_input")
+                )
+                OutlinedTextField(
+                    value = tokenUrl,
+                    onValueChange = { tokenUrl = it },
+                    label = { Text("LiveKit Token Endpoint (https://...)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_livekit_token_input")
+                )
+                OutlinedTextField(
+                    value = wsUrl,
+                    onValueChange = { wsUrl = it },
+                    label = { Text("LiveKit WebSocket URL (wss://...)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_livekit_ws_input")
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = {
+                            viewModel.saveVoiceRoomEndpoints(
+                                roomsUrl = roomsUrl,
+                                tokenEndpoint = tokenUrl,
+                                wsUrl = wsUrl,
+                                participantName = settings.voiceRoomParticipantName
+                            )
+                        },
+                        modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("settings_save_voice_rooms_btn")
+                    ) {
+                        Text("Save Endpoints")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            roomsUrl = ""
+                            tokenUrl = ""
+                            wsUrl = ""
+                            viewModel.clearVoiceRoomEndpoints()
+                        },
+                        modifier = Modifier.minimumInteractiveComponentSize().testTag("settings_clear_voice_rooms_btn")
+                    ) {
+                        Text("Disable / Clear")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Optional Firebase Auth & FCM", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            firebaseState.statusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    StatusPill(
+                        firebaseState.statusLabel,
+                        modifier = Modifier.testTag("settings_firebase_status_pill")
+                    )
+                }
+            }
+        }
+
         item {
             NeuralCard {
                 SectionHeader(
@@ -406,7 +619,7 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
 
         item {
             NeuralCard {
-                SectionHeader("AI, Privacy & Background Controls")
+                SectionHeader("AI, Privacy & Auto Mode Controls")
                 SettingToggleRow("Dark Neural Theme", "Obsidian & Cyan command interface", settings.darkTheme) { v ->
                     viewModel.updateSettings { it.copy(darkTheme = v) }
                 }
@@ -420,8 +633,53 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
                 ) { v ->
                     viewModel.updateSettings { it.copy(externalAiCallsEnabled = v) }
                 }
+                Text("Advisor Hourly Rate Limit", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(6, 12, 24, 48).forEach { lim ->
+                        FilterChip(
+                            selected = settings.advisorHourlyRateLimit == lim,
+                            onClick = { viewModel.updateSettings { it.copy(advisorHourlyRateLimit = lim) } },
+                            label = { Text("$lim/hr", maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+                SettingToggleRow(
+                    "Auto Mode (Safe Declarative Tools)",
+                    "Auto-activate ONLY zero-permission, zero-network, non-sensitive declarative tools after tests & scan pass (Undo + Notification included)",
+                    settings.autoActivateSafeDeclarativeTools
+                ) { v ->
+                    viewModel.updateSettings { it.copy(autoActivateSafeDeclarativeTools = v) }
+                }
                 SettingToggleRow("Confirm Sensitive Actions", "Require authorization before calls, social posts & tool installs", settings.confirmSensitiveActions) { v ->
                     viewModel.updateSettings { it.copy(confirmSensitiveActions = v) }
+                }
+                SettingToggleRow(
+                    "Direct Accessibility & Social Agent",
+                    "Enable Accessibility tools (read/tap/type/scroll/back/home) and WhatsApp/Social task state machine",
+                    settings.directAccessibilityAgentEnabled
+                ) { v ->
+                    viewModel.updateSettings { it.copy(directAccessibilityAgentEnabled = v) }
+                }
+                SettingToggleRow(
+                    "WhatsApp Notification Reader",
+                    "Allow NotificationListenerService to capture incoming WhatsApp notifications (read aloud only on request)",
+                    settings.whatsappNotifReaderEnabled
+                ) { v ->
+                    viewModel.toggleWhatsAppNotifReader(v)
+                }
+                SettingToggleRow(
+                    "Trigger Monitor Service",
+                    "Run background alarm & boot trigger monitor service",
+                    settings.triggerMonitorEnabled
+                ) { v ->
+                    viewModel.toggleTriggerMonitor(v)
+                }
+                SettingToggleRow(
+                    "Device Admin Receiver (Direct, Optional)",
+                    "Allow optional screen lock when user manually enables Teena Device Admin in Android Settings",
+                    settings.directDeviceAdminEnabled
+                ) { v ->
+                    viewModel.toggleDirectDeviceAdmin(v)
                 }
                 SettingToggleRow("Save Conversation Memory", "Persist long-term preferences & context locally", settings.saveConversationMemory) { v ->
                     viewModel.updateSettings { it.copy(saveConversationMemory = v) }
@@ -436,7 +694,7 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
             NeuralCard {
                 SectionHeader(
                     title = "Scheduled Self-Improvement (WorkManager)",
-                    subtitle = "Researches Gemini models, GitHub/HF tools & creates PROPOSED Marketplace items (never auto-installed)",
+                    subtitle = "Researches Gemini models, GitHub/HF tools & creates PROPOSED Marketplace items (never auto-installed except safe zero-perm Auto Mode)",
                     trailing = { StatusPill(if (settings.autoSelfImproveEnabled) "ACTIVE" else "PARTIAL") }
                 )
                 SettingToggleRow(
@@ -452,7 +710,7 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
                         FilterChip(
                             selected = settings.selfImproveIntervalHours == hrs,
                             onClick = { viewModel.updateSettings { it.copy(selfImproveIntervalHours = hrs) } },
-                            label = { Text("Every ${hrs}h") }
+                            label = { Text("Every ${hrs}h", maxLines = 1, softWrap = false) }
                         )
                     }
                 }
@@ -466,7 +724,7 @@ fun SettingsScreen(viewModel: TeenaViewModel) {
                     enabled = !isBusy && !emergencyStopped,
                     modifier = Modifier.fillMaxWidth().minimumInteractiveComponentSize().testTag("settings_run_research_btn")
                 ) {
-                    Text("Run Research Cycle Now")
+                    Text("Run Research Cycle Now", maxLines = 1, softWrap = false)
                 }
             }
         }

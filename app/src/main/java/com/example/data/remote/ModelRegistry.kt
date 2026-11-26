@@ -103,10 +103,20 @@ class ModelRegistry(
             val lower = shortId.lowercase()
             return lower.contains("-tts") ||
                 lower.contains("-image") ||
+                lower.contains("lyria") ||
                 lower.contains("robotics") ||
                 lower.contains("computer-use") ||
                 lower.contains("embedding") ||
                 lower.contains("aqa")
+        }
+
+        fun supportsVisionInput(model: GeminiModelInfo): Boolean {
+            if (!model.supportsGenerateContent) return false
+            val lower = model.shortId.lowercase()
+            return !lower.contains("-tts") &&
+                !lower.contains("lyria") &&
+                !lower.contains("embedding") &&
+                !lower.contains("aqa")
         }
 
         fun parseSemanticVersion(shortId: String): Triple<Int, Int, Int> {
@@ -297,6 +307,36 @@ class ModelRegistry(
                     .joinToString("; ") { "${it.modelId}: ${it.probeError}" }
                 throw IllegalStateException(
                     "All generateContent models are blacklisted for this key. $reasons"
+                )
+            }
+            ranked
+        }
+    }
+
+    suspend fun getRankedVisionCandidates(
+        apiKey: String,
+        forceRefresh: Boolean = false
+    ): Result<List<GeminiModelInfo>> {
+        val fp = keyFingerprint(apiKey)
+        return getOrRefreshModels(apiKey, forceRefresh).mapCatching { all ->
+            val visionCapable = all.filter { supportsVisionInput(it) && !isSpecializedNonChatModel(it.shortId) }
+                .ifEmpty { all.filter { supportsVisionInput(it) } }
+            if (visionCapable.isEmpty()) {
+                throw IllegalStateException(
+                    "ModelRegistry returned no vision-capable generateContent models for this API key."
+                )
+            }
+            val cachedMap = if (geminiModelDao != null && fp.isNotEmpty()) {
+                geminiModelDao.getModelsForKeyOnce(fp).associateBy { it.modelId }
+            } else emptyMap()
+
+            val ranked = rankModels(visionCapable, cachedMap, forLive = false)
+            if (ranked.isEmpty()) {
+                val reasons = cachedMap.values
+                    .filter { it.probeStatus == "BLACKLISTED" && it.supportsGenerateContent }
+                    .joinToString("; ") { "${it.modelId}: ${it.probeError}" }
+                throw IllegalStateException(
+                    "All vision-capable Gemini models are blacklisted for this key. $reasons"
                 )
             }
             ranked

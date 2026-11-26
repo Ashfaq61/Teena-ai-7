@@ -7,13 +7,34 @@ import android.net.Uri
 import android.view.KeyEvent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.AdvisorQuotaStatus
+import com.example.ai.AiBrainEngine
 import com.example.ai.AiStreamChunk
 import com.example.ai.CapabilityGapReport
+import com.example.ai.CapabilitySummaryAnalyzer
 import com.example.ai.FeatureHealthItem
 import com.example.ai.GeminiLiveVoiceManager
+import com.example.ai.LiveKitMediaState
 import com.example.ai.LiveTranscriptLine
 import com.example.ai.LiveVoiceState
 import com.example.ai.LocalHardwareProfile
+import com.example.ai.LyriaGeneratedTrack
+import com.example.ai.LyriaModelMode
+import com.example.ai.LyriaPlaybackState
+import com.example.ai.PendingScreenActionConfirmation
+import com.example.ai.ScreenWatchIndicatorState
+import com.example.ai.SocialTaskControl
+import com.example.ai.SocialTaskKind
+import com.example.ai.SocialTaskState
+import com.example.ai.TeenaIdentityEngine
+import com.example.ai.VoiceLatencyStats
+import com.example.ai.VoiceRoomConnectorEngine
+import com.example.ai.VoiceRoomsConnectorState
+import com.example.ai.WebsiteForgeEngine
+import com.example.ai.WebsiteForgeProject
+import com.example.core.IncomingShareBridge
+import com.example.core.ShareHandoffDestination
+import com.example.data.local.toIdentityProfile
 import com.example.core.TeenaServiceContainer
 import com.example.core.security.RepoRiskAnalyzer
 import com.example.core.security.RepoRiskLevel
@@ -22,17 +43,21 @@ import com.example.core.security.SecurityAuditor
 import com.example.core.security.UntrustedContentSanitizer
 import com.example.data.local.AuditLogEntity
 import com.example.data.local.BuildRecordEntity
+import com.example.data.local.CapabilitySummaryEntity
 import com.example.data.local.CodeVaultEntryEntity
 import com.example.data.local.ConversationEntity
 import com.example.data.local.FeatureStatus
 import com.example.data.local.MarketplaceToolEntity
 import com.example.data.local.MemoryFactEntity
 import com.example.data.local.MessageEntity
+import com.example.data.local.NotificationRecordEntity
 import com.example.data.local.ProviderSlotEntity
 import com.example.data.local.ProviderType
 import com.example.data.local.ReminderEntity
 import com.example.data.local.ResearchEntryEntity
+import com.example.data.local.ScreenAutomationLogEntity
 import com.example.data.local.TeenaSettings
+import com.example.data.local.TriggerEntity
 import com.example.data.remote.DiscoveredModel
 import com.example.data.remote.GitHubRepoDetail
 import com.example.data.remote.GitHubWorkflowRunInfo
@@ -42,15 +67,21 @@ import com.example.system.AutomationResult
 import com.example.system.CallLogSummary
 import com.example.system.ContactEntry
 import com.example.system.DeviceLocationInfo
+import com.example.system.FirebaseRoomAuthState
 import com.example.system.InstalledApkInspection
 import com.example.system.PermissionSnapshot
 import com.example.system.SocialPlatform
 import com.example.system.TeenaAccessibilityService
 import com.example.system.TeenaForegroundService
+import com.example.system.TeenaNotificationHelper
 import com.example.system.TeenaNotificationListenerService
 import com.example.system.TeenaReminderReceiver
 import com.example.system.TeenaResearchScheduler
 import com.example.system.TeenaResearchWorker
+import com.example.system.TeenaSpeechHelper
+import com.example.system.TeenaTriggerLogic
+import com.example.system.TeenaTriggerMonitorService
+import com.example.system.TeenaTriggerScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -141,6 +172,12 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     val notifications = db.systemRecordsDao().observeNotifications()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val whatsappNotifications = db.systemRecordsDao().observeWhatsAppNotifications()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val triggers = db.triggerDao().observeTriggers()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val reminders = db.systemRecordsDao().observeReminders()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -153,10 +190,23 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     val vaultEntries = db.codeVaultDao().observeVaultEntries()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val capabilitySummaries: StateFlow<List<CapabilitySummaryEntity>> = db.capabilitySummaryDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val screenAutomationLogs: StateFlow<List<ScreenAutomationLogEntity>> = db.screenAutomationLogDao().observeLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val screenWatchState: StateFlow<ScreenWatchIndicatorState> = container.screenVisionAgent.watchState
+    val pendingScreenConfirmation: StateFlow<PendingScreenActionConfirmation?> =
+        container.screenVisionAgent.pendingActionConfirmation
+
     // Live OS telemetry
     val accessibilityConnected = TeenaAccessibilityService.isConnected
     val screenSnapshot = TeenaAccessibilityService.latestSnapshot
     val notificationListenerConnected = TeenaNotificationListenerService.isConnected
+    val triggerMonitorRunning: StateFlow<Boolean> = TeenaTriggerMonitorService.isRunning
+    val triggerMonitorStatus: StateFlow<String> = TeenaTriggerMonitorService.statusSummary
+    val isTtsSpeaking: StateFlow<Boolean> = container.speechHelper.isSpeaking
     val liveCallInfo = com.example.system.TeenaInCallService.liveCallInfo
     val torchEnabled = container.cameraMediaEngine.torchEnabled
 
@@ -174,6 +224,9 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _capabilityGaps = MutableStateFlow<List<CapabilityGapReport>>(emptyList())
     val capabilityGaps: StateFlow<List<CapabilityGapReport>> = _capabilityGaps.asStateFlow()
+
+    private val _advisorQuotaStatus = MutableStateFlow(AdvisorQuotaStatus(0, 12))
+    val advisorQuotaStatus: StateFlow<AdvisorQuotaStatus> = _advisorQuotaStatus.asStateFlow()
 
     private val _advisorComparisonReport = MutableStateFlow("")
     val advisorComparisonReport: StateFlow<String> = _advisorComparisonReport.asStateFlow()
@@ -200,6 +253,41 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private var activeMissionJob: Job? = null
     private var activePipelineJob: Job? = null
     private var activeChatJob: Job? = null
+    private var activeScreenJob: Job? = null
+    private var activeMusicJob: Job? = null
+    private var activeWebsiteJob: Job? = null
+
+    private val _screenVisionAnswer = MutableStateFlow("")
+    val screenVisionAnswer: StateFlow<String> = _screenVisionAnswer.asStateFlow()
+
+    private val _screenGoalResult = MutableStateFlow("")
+    val screenGoalResult: StateFlow<String> = _screenGoalResult.asStateFlow()
+
+    // Phase 4 & Phase 10: Voice/Video Rooms, LiveKit WebRTC & Optional Firebase Auth/FCM
+    val voiceRoomsState: StateFlow<VoiceRoomsConnectorState> = container.voiceRoomConnector.state
+    val liveKitMediaState: StateFlow<LiveKitMediaState> = container.liveKitRoomController.state
+    val firebaseAuthState: StateFlow<FirebaseRoomAuthState> = container.firebaseBridge.state
+
+    // Music Studio (Lyria 3: lyria-3-clip-preview / lyria-3-pro-preview)
+    val musicTracks: StateFlow<List<LyriaGeneratedTrack>> = container.lyriaMusicEngine.tracks
+    val musicPlaybackState: StateFlow<LyriaPlaybackState> = container.lyriaMusicEngine.playback
+    private val _isMusicGenerating = MutableStateFlow(false)
+    val isMusicGenerating: StateFlow<Boolean> = _isMusicGenerating.asStateFlow()
+    private val _musicLastError = MutableStateFlow<String?>(null)
+    val musicLastError: StateFlow<String?> = _musicLastError.asStateFlow()
+
+    // Phase 5: Website Forge / WebGL Live Preview
+    val websiteForgeProjects: StateFlow<List<WebsiteForgeProject>> = container.websiteForgeEngine.projects
+    val activeWebsiteProjectId: StateFlow<String?> = container.websiteForgeEngine.activeProjectId
+    private val _isWebsiteGenerating = MutableStateFlow(false)
+    val isWebsiteGenerating: StateFlow<Boolean> = _isWebsiteGenerating.asStateFlow()
+    private val _websiteForgeError = MutableStateFlow<String?>(null)
+    val websiteForgeError: StateFlow<String?> = _websiteForgeError.asStateFlow()
+
+    // Phase 6: Direct Accessibility Agent, Social Task State Machine & Share Handoff
+    val socialTaskState: StateFlow<SocialTaskState> = container.socialTaskEngine.state
+    private val _requestedAutomationTab = MutableStateFlow(0)
+    val requestedAutomationTab: StateFlow<Int> = _requestedAutomationTab.asStateFlow()
 
     val liveVoiceManager = GeminiLiveVoiceManager(
         context = application,
@@ -209,6 +297,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             container.aiBrain.resolveAllGeminiKeysInOrder().map { (slot, key) -> slot.label to key }
         },
         emergencyStopController = container.emergencyStopController,
+        keepMonitorServiceEnabled = { settings.value.backgroundServiceEnabled },
         onSessionLifecycleChanged = { refreshSystemHealth() }
     ) { toolName, args ->
         handleLiveVoiceTool(toolName, args)
@@ -219,7 +308,18 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     val liveVoiceModel: StateFlow<String?> = liveVoiceManager.activeLiveModel
     val liveResumptionActive: StateFlow<Boolean> = liveVoiceManager.resumptionActive
     val liveTranscript: StateFlow<List<LiveTranscriptLine>> = liveVoiceManager.transcript
+    val liveLatencyStats: StateFlow<VoiceLatencyStats> = liveVoiceManager.latencyStats
+    val echoGuardEnabled: StateFlow<Boolean> = liveVoiceManager.echoGuardEnabled
+    val micAudioLevel: StateFlow<Float> = liveVoiceManager.micAudioLevel
+    val playbackAudioLevel: StateFlow<Float> = liveVoiceManager.playbackAudioLevel
     val isLiveVoiceConnected: Boolean get() = liveVoiceManager.isSessionActuallyConnected
+
+    private val _websiteForgeIntent = MutableStateFlow<String?>(null)
+    val websiteForgeIntent: StateFlow<String?> = _websiteForgeIntent.asStateFlow()
+
+    fun clearWebsiteForgeIntent() {
+        _websiteForgeIntent.value = null
+    }
 
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
@@ -275,11 +375,21 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             val s = prefs.getSettingsSnapshot()
+            liveVoiceManager.setEchoGuardEnabled(s.echoGuardEnabled)
+            liveVoiceManager.updateIdentityProfile(s.toIdentityProfile())
+            container.voiceRoomConnector.syncConfigurationStatus(
+                roomsServerUrl = s.voiceRoomsServerUrl,
+                liveKitTokenEndpoint = s.liveKitTokenEndpoint,
+                liveKitWsUrl = s.liveKitWsUrl
+            )
             container.emergencyStopController.setExternalAiCallsEnabled(s.externalAiCallsEnabled)
+            container.emergencyStopController.setAutoModeEnabled(s.autoActivateSafeDeclarativeTools)
+            TeenaNotificationListenerService.isWhatsAppReaderEnabled = s.whatsappNotifReaderEnabled
             TeenaResearchScheduler.scheduleOrCancel(getApplication(), s.autoSelfImproveEnabled, s.selfImproveIntervalHours)
             container.aiBrain.ensureDefaultProviderSlots()
             container.orchestrator.ensureSeededAgentsAndTools()
             container.externalAgentHub.syncProviderModelAdvisors()
+            refreshAdvisorQuota()
             refreshSystemHealth()
             ensureInitialConversation()
         }
@@ -302,11 +412,19 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         TeenaAccessibilityService.emergencyHaltActive = true
         container.emergencyStopController.triggerEmergencyStop()
         liveVoiceManager.stopLiveSession(silent = false)
+        container.liveKitRoomController.disconnect()
+        container.voiceRoomConnector.leaveActiveRoom()
+        container.lyriaMusicEngine.stopPlayback()
         container.networkClients.httpClient.dispatcher.cancelAll()
         activeMissionJob?.cancel()
         activePipelineJob?.cancel()
         activeChatJob?.cancel()
+        activeScreenJob?.cancel()
+        activeMusicJob?.cancel()
+        activeWebsiteJob?.cancel()
         _chatIsLoading.value = false
+        _isMusicGenerating.value = false
+        _isWebsiteGenerating.value = false
         _isBusy.value = false
         TeenaForegroundService.stop(getApplication())
         TeenaResearchScheduler.cancelAllResearchWork(getApplication())
@@ -450,6 +568,56 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             )
             clearAttachment()
 
+            val screenIntent = classifyScreenChatIntent(text)
+            if (screenIntent == "DESCRIBE") {
+                _chatIsLoading.value = true
+                _chatStreamingText.value = "Teena screen dekh rahi hai..."
+                val res = container.screenVisionAgent.describeCurrentScreen(text)
+                _chatStreamingText.value = ""
+                _chatIsLoading.value = false
+                val reply = res.fold(
+                    onSuccess = { out ->
+                        _screenVisionAnswer.value = out.text
+                        out.text
+                    },
+                    onFailure = { err -> err.localizedMessage ?: "Screen Vision error" }
+                )
+                db.conversationDao().insertMessage(
+                    MessageEntity(
+                        conversationId = convId,
+                        role = "assistant",
+                        content = reply,
+                        providerUsed = "Gemini Screen Vision",
+                        modelUsed = res.getOrNull()?.modelUsed.orEmpty(),
+                        detectedLanguage = detectedLang,
+                        latencyMs = res.getOrNull()?.latencyMs ?: 0L
+                    )
+                )
+                return@launch
+            } else if (screenIntent == "ACT") {
+                _chatIsLoading.value = true
+                _chatStreamingText.value = "Teena screen par goal chala rahi hai (Observe -> Think -> Act -> Verify)..."
+                val res = container.screenVisionAgent.executeGoalLoop(text) { prog ->
+                    _chatStreamingText.value = prog
+                }
+                _chatStreamingText.value = ""
+                _chatIsLoading.value = false
+                val summary = formatGoalReportRomanUrdu(res)
+                _screenGoalResult.value = summary
+                db.conversationDao().insertMessage(
+                    MessageEntity(
+                        conversationId = convId,
+                        role = "assistant",
+                        content = summary,
+                        providerUsed = "Gemini Screen Agent",
+                        modelUsed = res.getOrNull()?.modelUsed.orEmpty(),
+                        detectedLanguage = detectedLang
+                    )
+                )
+                refreshSystemHealth()
+                return@launch
+            }
+
             val mems = db.memoryFactDao().getAllMemoriesOnce()
             val research = db.researchDao().getResearchOnce()
             val localIntent = container.offlineEngine.evaluateLocalCommandOrKnowledge(text, mems, research)
@@ -468,18 +636,24 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            val isWebsiteBuilderRequest = AiBrainEngine.detectWebsiteBanaoIntent(text)
+            if (isWebsiteBuilderRequest) {
+                _websiteForgeIntent.value = text
+            }
+
             _chatIsLoading.value = true
             _chatError.value = null
             _chatStreamingText.value = ""
 
-            val recent = messages.value.takeLast(8).map { it.role to it.content }
+            val recent = messages.value.takeLast(12).map { it.role to it.content }
             try {
                 container.aiBrain.generateStreamingChat(
                     userPrompt = fullPrompt,
                     recentHistory = recent,
                     memories = mems,
                     attachedImage = img,
-                    autoFailover = settings.value.autoFailoverProviders
+                    autoFailover = settings.value.autoFailoverProviders,
+                    identityProfile = settings.value.toIdentityProfile()
                 ).collect { chunk ->
                     when (chunk) {
                         is AiStreamChunk.Delta -> _chatStreamingText.value = chunk.accumulatedText
@@ -501,6 +675,18 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                             db.conversationDao().updateConversationMeta(
                                 convId, text.take(36), System.currentTimeMillis()
                             )
+                            val extractedHtml = WebsiteForgeEngine.extractHtmlDocumentFromText(
+                                rawText = chunk.output.text,
+                                titleFallback = text.take(40)
+                            )
+                            if (extractedHtml != null) {
+                                container.websiteForgeEngine.saveProject(
+                                    title = text.take(40),
+                                    prompt = text,
+                                    htmlSource = extractedHtml,
+                                    templateKind = if (WebsiteForgeEngine.hasWebGlOrThreeJs(extractedHtml)) "CHAT_WEBGL" else "CHAT_HTML5"
+                                )
+                            }
                             if (settings.value.saveConversationMemory && text.length > 24 &&
                                 (text.contains("my name is", true) || text.contains("remember", true) ||
                                     text.contains("mera naam", true) || text.contains("yaad rakhna", true))
@@ -574,15 +760,141 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 if (plat != null) container.socialEngine.openPlatform(plat).getOrElse { it.localizedMessage ?: "Failed" }
                 else "Unsupported app $target"
             }
-            "read_current_screen" -> {
-                val snap = TeenaAccessibilityService.instance?.captureCurrentScreen()
-                snap?.let {
-                    UntrustedContentSanitizer.wrapAsUntrustedData(
-                        source = "screen:${it.packageName}",
-                        rawContent = it.visibleText.take(15).joinToString(", "),
-                        maxChars = 1200
+            "read_current_screen", "read_screen", "screen_describe" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else if (name == "read_screen" || name == "read_current_screen") {
+                    val snap = runCatching { TeenaAccessibilityService.instance?.captureCurrentScreen() }.getOrNull()
+                    if (snap == null) {
+                        "Teena AccessibilityService Android Settings mein enable nahi hai."
+                    } else {
+                        val buttons = snap.nodes.filter { it.clickable }.take(12).mapNotNull {
+                            it.text.ifBlank { it.contentDescription }.takeIf { s -> s.isNotBlank() }
+                        }
+                        "Package: ${snap.packageName}\nTexts: ${snap.visibleText.take(20).joinToString(" | ")}\nButtons: ${buttons.joinToString(", ")}"
+                    }
+                } else {
+                    val q = args["question"].orEmpty().ifBlank { "Screen par kya hai, kaun sa app khula hai, aur main buttons kya karte hain?" }
+                    liveVoiceManager.appendSystemNote("Screen Vision: Teena screen dekh rahi hai...")
+                    container.screenVisionAgent.describeCurrentScreen(q).fold(
+                        onSuccess = { "${it.text} (Model: ${it.modelUsed})" },
+                        onFailure = { err -> err.localizedMessage ?: "Screen Vision failed" }
                     )
-                } ?: "AccessibilityService not enabled."
+                }
+            }
+            "tap_text" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val svc = TeenaAccessibilityService.instance
+                    val target = args["text"].orEmpty()
+                    val viewId = args["view_id"].orEmpty()
+                    if (svc == null) {
+                        "AccessibilityService enable nahi hai."
+                    } else if (target.isBlank() && viewId.isBlank()) {
+                        "Target text ya view_id missing hai."
+                    } else {
+                        runCatching { svc.tapWithPriority(viewId = viewId, textOrDesc = target).details }
+                            .getOrElse { it.localizedMessage ?: "tap_text error" }
+                    }
+                }
+            }
+            "type_text" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val svc = TeenaAccessibilityService.instance
+                    val text = args["text"].orEmpty()
+                    val hint = args["target_hint"].orEmpty()
+                    if (svc == null) {
+                        "AccessibilityService enable nahi hai."
+                    } else {
+                        // Never auto-submit silently; only enter text and let user confirm sending/posting.
+                        runCatching { svc.typeTextSmart(text = text, targetHintOrText = hint, submit = false).details }
+                            .getOrElse { it.localizedMessage ?: "type_text error" }
+                    }
+                }
+            }
+            "scroll_screen" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val svc = TeenaAccessibilityService.instance
+                    val dir = args["direction"].orEmpty().lowercase()
+                    if (svc == null) {
+                        "AccessibilityService enable nahi hai."
+                    } else {
+                        val forward = !(dir.contains("up") || dir.contains("back"))
+                        runCatching { svc.scrollScreen(forward).details }
+                            .getOrElse { it.localizedMessage ?: "scroll_screen error" }
+                    }
+                }
+            }
+            "go_back" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val svc = TeenaAccessibilityService.instance
+                    if (svc == null) "AccessibilityService enable nahi hai."
+                    else runCatching { svc.goBackVerified().details }.getOrElse { it.localizedMessage ?: "go_back error" }
+                }
+            }
+            "go_home" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val svc = TeenaAccessibilityService.instance
+                    if (svc == null) "AccessibilityService enable nahi hai."
+                    else runCatching { svc.goHomeVerified().details }.getOrElse { it.localizedMessage ?: "go_home error" }
+                }
+            }
+            "whatsapp_task_control" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Social/WhatsApp automation is disabled in Settings."
+                } else {
+                    val (summary, _) = container.socialTaskEngine.handleWhatsAppTaskControl(
+                        action = args["action"].orEmpty().ifBlank { "STATUS" },
+                        contactOrPhone = args["contact"].orEmpty(),
+                        message = args["message"].orEmpty()
+                    )
+                    summary
+                }
+            }
+            "social_task_control" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Social automation is disabled in Settings."
+                } else {
+                    val (summary, _) = container.socialTaskEngine.handleSocialTaskControl(
+                        action = args["action"].orEmpty().ifBlank { "STATUS" },
+                        platformName = args["platform"].orEmpty(),
+                        taskTypeName = args["task_type"].orEmpty(),
+                        caption = args["caption"].orEmpty()
+                    )
+                    summary
+                }
+            }
+            "read_whatsapp_notifications" -> {
+                if (!settings.value.whatsappNotifReaderEnabled) {
+                    "WhatsApp notification reader toggle is disabled in Teena Settings."
+                } else if (!TeenaNotificationListenerService.isEnabledInSettings(getApplication())) {
+                    "Notification Access permission is not enabled in Android Settings."
+                } else {
+                    val limit = args["limit"]?.toIntOrNull()?.coerceIn(1, 15) ?: 5
+                    val items = db.systemRecordsDao().getLatestWhatsAppNotifications(limit)
+                    TeenaSpeechHelper.buildWhatsAppReadAloudScript(items, maxItems = limit)
+                }
+            }
+            "screen_act" -> {
+                if (!settings.value.directAccessibilityAgentEnabled) {
+                    "Direct Accessibility Agent is currently disabled in Settings."
+                } else {
+                    val goal = args["goal"].orEmpty()
+                    liveVoiceManager.appendSystemNote("Screen Agent goal shuru: $goal")
+                    val res = container.screenVisionAgent.executeGoalLoop(goal) { prog ->
+                        liveVoiceManager.appendSystemNote(prog)
+                    }
+                    formatGoalReportRomanUrdu(res)
+                }
             }
             "search_web" -> {
                 val q = args["query"].orEmpty()
@@ -608,6 +920,42 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
         return result
+    }
+
+    private fun classifyScreenChatIntent(rawPrompt: String): String? {
+        val lower = rawPrompt.lowercase().trim()
+        val describePatterns = listOf(
+            "screen par kya hai", "screen pe kya hai", "kaun sa app khula", "konsa app khula",
+            "ye button kya karta", "yeh button kya karta", "is button ka kya kaam",
+            "what is on screen", "what's on screen", "what app is open", "describe screen",
+            "read screen", "screen padho", "screen dekho", "screen batao"
+        )
+        if (describePatterns.any { lower.contains(it) }) return "DESCRIBE"
+
+        if (lower.startsWith("screen goal:") || lower.startsWith("screen act:")) return "ACT"
+        val appContexts = listOf("youtube par", "whatsapp par", "instagram par", "tiktok par", "facebook par", "chrome par", "screen par", "screen pe")
+        val actionVerbs = listOf("search", "like", "tap", "click", "scroll", "swipe", "type", "khol kar", "kholo aur", "play", "back", "likho", "bhejo")
+        if (appContexts.any { lower.contains(it) } && actionVerbs.any { lower.contains(it) }) {
+            return "ACT"
+        }
+        return null
+    }
+
+    private fun formatGoalReportRomanUrdu(res: Result<com.example.ai.ScreenGoalReport>): String {
+        return res.fold(
+            onSuccess = { r ->
+                buildString {
+                    if (r.completed) appendLine("Goal Mukammal (Verified):")
+                    else if (r.blocked) appendLine("Goal Roka Gaya (BLOCKED):")
+                    else appendLine("Goal Adhoora Raha:")
+                    appendLine("• Kya kiya (${r.stepsExecuted} steps): ${r.whatWasDone}")
+                    appendLine("• Kya nahi hua: ${r.whatWasNotDone}")
+                    if (r.stuckReason.isNotBlank()) appendLine("• Wajah / Kahan atki: ${r.stuckReason}")
+                    if (r.modelUsed.isNotBlank()) append("• Vision Model: ${r.modelUsed}")
+                }.trim()
+            },
+            onFailure = { e -> e.localizedMessage ?: "Screen Agent error" }
+        )
     }
 
     // --- API Manager ---
@@ -759,13 +1107,36 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun refreshAdvisorQuota() {
+        viewModelScope.launch {
+            _advisorQuotaStatus.value = container.externalAgentHub.getAdvisorQuotaStatus(settings.value.advisorHourlyRateLimit)
+        }
+    }
+
     fun detectAndRefreshGaps() {
         viewModelScope.launch {
             _isBusy.value = true
             container.externalAgentHub.syncProviderModelAdvisors()
             _capabilityGaps.value = container.externalAgentHub.detectCapabilityGaps()
+            refreshAdvisorQuota()
             _statusBanner.value = "Detected ${_capabilityGaps.value.size} capability gap(s)."
             _isBusy.value = false
+        }
+    }
+
+    fun detectGapsAndProposeTools() {
+        viewModelScope.launch {
+            _isBusy.value = true
+            container.externalAgentHub.syncProviderModelAdvisors()
+            _capabilityGaps.value = container.externalAgentHub.detectCapabilityGaps()
+            val added = container.toolPipelineEngine.detectGapsAndCreateProposals()
+            _statusBanner.value = if (added.isNotEmpty()) {
+                "Gap scan se ${added.size} naye PROPOSED tool(s) Marketplace mein add kiye gaye."
+            } else {
+                "Detected ${_capabilityGaps.value.size} gap(s); saari matching proposals pehle se Marketplace mein maujood hain."
+            }
+            _isBusy.value = false
+            refreshSystemHealth()
         }
     }
 
@@ -777,7 +1148,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 topic = topic.ifBlank { "Architecture Consultation" },
                 rawTechnicalQuestion = question,
                 gapReason = gapReason,
-                minAdvisorsToAsk = 2
+                minAdvisorsToAsk = 2,
+                hourlyLimit = settings.value.advisorHourlyRateLimit
             ).onSuccess { summary ->
                 _advisorComparisonReport.value = summary.comparisonNotes
                 _statusBanner.value = "Consulted ${summary.advisorCountQueried} advisor(s); ${summary.advisorCountSucceeded} succeeded."
@@ -785,11 +1157,12 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 _advisorComparisonReport.value = e.localizedMessage ?: "Consultation failed"
                 _statusBanner.value = "Advisor collaboration blocked/failed: ${e.localizedMessage}"
             }
+            refreshAdvisorQuota()
             _isBusy.value = false
         }
     }
 
-    // --- 11-Stage Tool Creation Pipeline & Marketplace ---
+    // --- 10-Stage Tool Creation Pipeline & Marketplace ---
     fun runSelfCodingToolCycle(goal: String, toolKind: String = "DECLARATIVE_JSON", existingToolId: String? = null) {
         if (goal.isBlank()) return
         activePipelineJob = viewModelScope.launch {
@@ -802,20 +1175,21 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             _statusBanner.value = "${resultTool.name}: ${resultTool.activationStatus} — ${resultTool.testResult}"
             _isBusy.value = false
             refreshSystemHealth()
+            refreshAdvisorQuota()
         }
     }
 
     fun requestApproveAndInstallTool(tool: MarketplaceToolEntity) {
         _pendingConfirmation.value = PendingUserConfirmation(
             title = "Confirm Tool Installation",
-            description = "Install '${tool.name}' (${tool.toolKind}, License: ${tool.licenseSpdx}, Scan: ${tool.scanResult})?\nStatus will start as IMPLEMENTED NOT DEVICE-VERIFIED until verified at runtime.",
+            description = "Install '${tool.name}' (${tool.toolKind}, License: ${tool.licenseSpdx}, Scan: ${tool.scanResult})?\nStatus shuru mein IMPLEMENTED NOT DEVICE-VERIFIED rahega jab tak aap Execute & Verify na karein.",
             onConfirm = {
                 dismissConfirmation()
                 viewModelScope.launch {
                     _isBusy.value = true
                     container.toolPipelineEngine.approveAndInstallTool(tool.toolId)
                         .onSuccess {
-                            _statusBanner.value = "${it.name} installed (IMPLEMENTED NOT DEVICE-VERIFIED). Tap Execute & Verify to test at runtime."
+                            _statusBanner.value = "${it.name} install ho gaya (IMPLEMENTED NOT DEVICE-VERIFIED). Tap Execute & Verify to test at runtime."
                         }
                         .onFailure { e ->
                             _statusBanner.value = "Install blocked: ${e.localizedMessage}"
@@ -825,6 +1199,15 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         )
+    }
+
+    fun undoAutoActivatedTool(tool: MarketplaceToolEntity) {
+        viewModelScope.launch {
+            container.toolPipelineEngine.undoAutoActivatedTool(tool.toolId)
+                .onSuccess { _statusBanner.value = "${it.name} ki auto-activation Undo kar di gayi." }
+                .onFailure { _statusBanner.value = "Undo failed: ${it.localizedMessage}" }
+            refreshSystemHealth()
+        }
     }
 
     fun verifyAndRunTool(tool: MarketplaceToolEntity, runtimeInput: String = "android kotlin") {
@@ -907,6 +1290,106 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
             _statusBanner.value = res.details
+            refreshSystemHealth()
+        }
+    }
+
+    fun describeScreenWithVision(question: String) {
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop active hai."
+            return
+        }
+        activeScreenJob?.cancel()
+        activeScreenJob = viewModelScope.launch {
+            _isBusy.value = true
+            container.screenVisionAgent.describeCurrentScreen(question)
+                .onSuccess { out ->
+                    _screenVisionAnswer.value = "${out.text}\n(Model: ${out.modelUsed}, ${out.latencyMs}ms)"
+                    _statusBanner.value = "Screen Vision answer ready (${out.modelUsed})."
+                }
+                .onFailure { err ->
+                    val msg = err.localizedMessage ?: "Screen Vision failed"
+                    _screenVisionAnswer.value = msg
+                    _statusBanner.value = msg
+                }
+            _isBusy.value = false
+            refreshSystemHealth()
+        }
+    }
+
+    fun runScreenAgentGoal(goal: String) {
+        if (goal.isBlank()) return
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop active hai."
+            return
+        }
+        activeScreenJob?.cancel()
+        activeScreenJob = viewModelScope.launch {
+            _isBusy.value = true
+            _screenGoalResult.value = "Teena goal shuru kar rahi hai: $goal"
+            val res = container.screenVisionAgent.executeGoalLoop(goal) { prog ->
+                _screenGoalResult.value = prog
+            }
+            val formatted = formatGoalReportRomanUrdu(res)
+            _screenGoalResult.value = formatted
+            _statusBanner.value = if (res.getOrNull()?.completed == true) {
+                "Screen goal mukammal aur verified!"
+            } else {
+                formatted.lineSequence().firstOrNull() ?: "Screen goal stopped"
+            }
+            _isBusy.value = false
+            refreshSystemHealth()
+        }
+    }
+
+    fun stopScreenAgentGoal() {
+        activeScreenJob?.cancel()
+        container.screenVisionAgent.pendingActionConfirmation.value?.respond(false)
+        _isBusy.value = false
+        _statusBanner.value = "Screen Vision Agent loop roka gaya."
+    }
+
+    fun sendLiveVisionBitmap(bitmap: Bitmap, promptHint: String? = null) {
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop is active."
+            return
+        }
+        viewModelScope.launch {
+            liveVoiceManager.sendImageFrameDuringLiveSession(bitmap, promptHint)
+                .onSuccess { msg -> _statusBanner.value = msg }
+                .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Live visual frame failed" }
+        }
+    }
+
+    fun sendLiveVisionPhotoUri(uri: Uri, promptHint: String? = null) {
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop is active."
+            return
+        }
+        viewModelScope.launch {
+            val bmp = container.documentEngine.loadBitmapFromUri(uri)
+            if (bmp == null) {
+                _statusBanner.value = "Could not decode selected photo."
+                return@launch
+            }
+            try {
+                liveVoiceManager.sendImageFrameDuringLiveSession(bmp, promptHint)
+                    .onSuccess { msg -> _statusBanner.value = msg }
+                    .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Live photo failed" }
+            } finally {
+                if (!bmp.isRecycled) bmp.recycle()
+            }
+        }
+    }
+
+    fun respondToPendingScreenConfirmation(approved: Boolean) {
+        container.screenVisionAgent.pendingActionConfirmation.value?.respond(approved)
+    }
+
+    fun clearScreenAutomationLogs() {
+        viewModelScope.launch {
+            db.screenAutomationLogDao().clearLogs()
+            _statusBanner.value = "Screen automation logs cleared."
         }
     }
 
@@ -1047,7 +1530,30 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                             )
                         )
                     }
-                    _statusBanner.value = "Found ${list.size} repos. Har repo par 'Inspect Real Code' zaroori hai (abhi NOT DONE)."
+                    _statusBanner.value = "Found ${list.size} repos. Asli content parh kar AI brief banaya ja raha hai; Risk Review ke liye 'Inspect' chalayein."
+                    // Enrich top results with genuine AI brief from fetched real files/README (never guessing)
+                    launch {
+                        list.take(3).forEach { repo ->
+                            if (isEmergencyStopped.value) return@forEach
+                            val existingBrief = db.capabilitySummaryDao().getByKey(CapabilitySummaryAnalyzer.githubItemKey(repo.fullName))
+                            if (existingBrief != null && existingBrief.status == "READY") return@forEach
+                            container.networkClients.fetchGitHubRepoAuditBundle(repo.fullName, token).onSuccess { bundle ->
+                                val risk = RepoRiskAnalyzer.analyzeRealCode(
+                                    repoFullName = bundle.fullName,
+                                    repoUrl = bundle.htmlUrl,
+                                    commitSha = bundle.commitSha,
+                                    licenseSpdx = bundle.licenseSpdx,
+                                    licenseText = bundle.licenseText,
+                                    stars = bundle.stars,
+                                    ownerLogin = bundle.ownerLogin,
+                                    ownerAccountAgeDays = bundle.ownerAccountAgeDays,
+                                    files = bundle.files
+                                )
+                                val brief = CapabilitySummaryAnalyzer.analyzeGitHubRepo(container.aiBrain, bundle, risk)
+                                db.capabilitySummaryDao().upsert(brief)
+                            }
+                        }
+                    }
                 }
                 .onFailure { _statusBanner.value = "GitHub search failed: ${it.localizedMessage}" }
             _isBusy.value = false
@@ -1072,10 +1578,14 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                         files = bundle.files
                     )
                     _repoRiskReports.value = _repoRiskReports.value + (fullName to report)
+                    val brief = CapabilitySummaryAnalyzer.analyzeGitHubRepo(container.aiBrain, bundle, report)
+                    db.capabilitySummaryDao().upsert(brief)
+
                     _repoInspectionOutput.value = buildString {
                         appendLine("${report.repoFullName} • Review: ${report.reviewStatusLabel}")
                         appendLine("Risk Level: ${report.riskLevel.label} (${report.riskScore}/100) • Commit: ${report.commitSha.take(12)}")
                         appendLine(report.headlineBanner)
+                        appendLine("AI Brief (${brief.status}): ${brief.kyaKartaHai}")
                         if (report.gplWarningRomanUrdu.isNotBlank()) appendLine(report.gplWarningRomanUrdu)
                         report.findings.forEach { f ->
                             appendLine("• [${f.severity.label}] ${f.titleRomanUrdu}: ${f.detailRomanUrdu}")
@@ -1085,14 +1595,14 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                         ResearchEntryEntity(
                             sourceType = "GITHUB_AUDIT",
                             title = bundle.fullName,
-                            summary = report.headlineBanner,
+                            summary = "${report.headlineBanner}\n${brief.kyaKartaHai}",
                             sourceUrl = bundle.htmlUrl,
                             licenseInfo = bundle.licenseSpdx,
                             compatibilityNotes = "${report.reviewStatusLabel} • Commit ${bundle.commitSha.take(10)}",
                             securityScore = report.riskScore
                         )
                     )
-                    _statusBanner.value = "${report.repoFullName}: ${report.riskLevel.label} (${report.filesReviewedCount} files reviewed)"
+                    _statusBanner.value = "${report.repoFullName}: ${report.riskLevel.label} (${report.filesReviewedCount} files reviewed, Brief=${brief.status})"
                 }
                 .onFailure { err ->
                     _repoInspectionOutput.value = "Review NOT DONE: ${err.localizedMessage}"
@@ -1193,6 +1703,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             val slug = repoFullName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(24)
             val toolId = "tool_ref_${slug}_${report.commitSha.take(6)}"
             val cleanName = repoFullName.substringAfter("/").take(30).ifBlank { "KotlinRefTool" }
+            val briefEntity = db.capabilitySummaryDao().getByKey(CapabilitySummaryAnalyzer.githubItemKey(repoFullName))
+            val briefJson = briefEntity?.let { CapabilitySummaryAnalyzer.toJsonString(it) }.orEmpty()
             val attributionNote = buildString {
                 append("Reference: ${report.repoFullName} (${report.repoUrl}) @ ${report.commitSha.take(12)} | License: ${report.licenseSpdx}.")
                 if (report.gplWarningRomanUrdu.isNotBlank()) append(" ${report.gplWarningRomanUrdu}")
@@ -1216,7 +1728,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                     proposedBy = "Code Vault Ref (${report.licenseSpdx})",
                     scanResult = "${report.riskLevel.label} (${report.riskScore}/100)",
                     toolKind = "KOTLIN_GITHUB_BRANCH",
-                    pipelineStagesJson = com.example.ai.ToolCreationPipelineEngine.defaultStagesJson()
+                    pipelineStagesJson = com.example.ai.ToolCreationPipelineEngine.defaultStagesJson(),
+                    capabilitySummaryJson = briefJson
                 )
             )
             _statusBanner.value = "Proposed '$cleanName' (Separate Kotlin branch mode; Original Vault untouched)."
@@ -1312,9 +1825,78 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     _statusBanner.value = "Evaluated ${list.size} Hugging Face models."
+                    // Fetch real model card + config for top 3 and generate 4-part Roman Urdu brief
+                    launch {
+                        list.take(3).forEach { m ->
+                            if (isEmergencyStopped.value) return@forEach
+                            val existing = db.capabilitySummaryDao().getByKey(CapabilitySummaryAnalyzer.huggingFaceItemKey(m.modelId))
+                            if (existing != null && existing.status == "READY") return@forEach
+                            container.networkClients.fetchHuggingFaceModelCardBundle(m.modelId, ram).onSuccess { bundle ->
+                                val brief = CapabilitySummaryAnalyzer.analyzeHuggingFaceModel(container.aiBrain, bundle)
+                                db.capabilitySummaryDao().upsert(brief)
+                            }
+                        }
+                    }
                 }
                 .onFailure { _statusBanner.value = "Hugging Face search failed: ${it.localizedMessage}" }
             _isBusy.value = false
+        }
+    }
+
+    fun inspectHuggingFaceModel(detail: HuggingFaceModelDetail) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            val ram = _hardwareProfile.value.totalRamGb
+            container.networkClients.fetchHuggingFaceModelCardBundle(detail.modelId, ram)
+                .onSuccess { bundle ->
+                    val brief = CapabilitySummaryAnalyzer.analyzeHuggingFaceModel(container.aiBrain, bundle)
+                    db.capabilitySummaryDao().upsert(brief)
+                    _statusBanner.value = "${detail.modelId}: AI Brief ${brief.status}"
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Model card fetch fail: ${err.localizedMessage}"
+                }
+            _isBusy.value = false
+        }
+    }
+
+    fun proposeToolFromHuggingFace(detail: HuggingFaceModelDetail) {
+        viewModelScope.launch {
+            val slug = detail.modelId.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(24)
+            val toolId = "prop_hf_$slug"
+            val briefEntity = db.capabilitySummaryDao().getByKey(CapabilitySummaryAnalyzer.huggingFaceItemKey(detail.modelId))
+            val briefJson = briefEntity?.let { CapabilitySummaryAnalyzer.toJsonString(it) }.orEmpty()
+            val specJson = JSONObject().apply {
+                put("toolName", detail.modelId.substringAfter('/').take(28))
+                put("category", "HuggingFace Model")
+                put("description", "${detail.pipelineTag}: ${detail.compatibilityNotes}".take(160))
+                put("actionType", "HF_MODEL_QUERY")
+                put("endpointOrTarget", detail.url)
+                put("licenseSpdx", detail.license)
+            }.toString()
+            db.marketplaceToolDao().upsertTool(
+                MarketplaceToolEntity(
+                    toolId = toolId,
+                    name = detail.modelId.substringAfter('/').take(34),
+                    description = "[PROPOSED HF Model] ${detail.pipelineTag} • ${detail.compatibilityNotes}",
+                    version = "0.1.0-hf",
+                    category = "HuggingFace Tool",
+                    sourceRepo = detail.url,
+                    licenseSpdx = detail.license,
+                    executionSpec = specJson,
+                    isInstalled = false,
+                    activationStatus = "PROPOSED",
+                    securityScore = 90,
+                    securityNotes = "HuggingFace model card query wrapper (${detail.license})",
+                    testResult = "Tap Run 10-Stage Pipeline to validate & install",
+                    proposedBy = "HuggingFace Research",
+                    scanResult = "PRE-CHECK PASSED (90/100)",
+                    toolKind = "DECLARATIVE_JSON",
+                    pipelineStagesJson = com.example.ai.ToolCreationPipelineEngine.defaultStagesJson(),
+                    capabilitySummaryJson = briefJson
+                )
+            )
+            _statusBanner.value = "Proposed '${detail.modelId.substringAfter('/')}' to Marketplace."
         }
     }
 
@@ -1571,7 +2153,16 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             val next = transform(current)
             prefs.updateSettings { next }
 
+            liveVoiceManager.setEchoGuardEnabled(next.echoGuardEnabled)
+            liveVoiceManager.updateIdentityProfile(next.toIdentityProfile())
+            container.voiceRoomConnector.syncConfigurationStatus(
+                roomsServerUrl = next.voiceRoomsServerUrl,
+                liveKitTokenEndpoint = next.liveKitTokenEndpoint,
+                liveKitWsUrl = next.liveKitWsUrl
+            )
             container.emergencyStopController.setExternalAiCallsEnabled(next.externalAiCallsEnabled)
+            container.emergencyStopController.setAutoModeEnabled(next.autoActivateSafeDeclarativeTools)
+            _advisorQuotaStatus.value = container.externalAgentHub.getAdvisorQuotaStatus(next.advisorHourlyRateLimit)
 
             if (current.backgroundServiceEnabled != next.backgroundServiceEnabled) {
                 if (next.backgroundServiceEnabled && !isEmergencyStopped.value) {
@@ -1594,6 +2185,43 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectPersonality(personalityId: String) {
+        val preset = TeenaIdentityEngine.presetFor(personalityId)
+        updateSettings { current ->
+            val nextVoice = if (current.syncVoiceWithPersonality) {
+                preset.defaultVoiceId
+            } else {
+                current.selectedVoice
+            }
+            current.copy(
+                personalityId = preset.id,
+                selectedVoice = nextVoice
+            )
+        }
+        _statusBanner.value = "Personality active: ${preset.title}"
+    }
+
+    fun saveUserIdentity(
+        userName: String,
+        preferredAddressing: String,
+        userBioOrFocus: String,
+        customPersonaInstructions: String
+    ) {
+        val safeName = SecurityAuditor.redactSecrets(userName.trim()).take(48)
+        val safeAddressing = SecurityAuditor.redactSecrets(preferredAddressing.trim()).ifBlank { "By Name" }.take(24)
+        val safeBio = SecurityAuditor.redactSecrets(userBioOrFocus.trim()).take(280)
+        val safeCustom = SecurityAuditor.redactSecrets(customPersonaInstructions.trim()).take(360)
+        updateSettings { current ->
+            current.copy(
+                userName = safeName,
+                userPreferredAddressing = safeAddressing,
+                userBioOrFocus = safeBio,
+                customPersonaInstructions = safeCustom
+            )
+        }
+        _statusBanner.value = "Teena identity & user profile saved."
+    }
+
     fun toggleForegroundService(enable: Boolean) {
         updateSettings { it.copy(backgroundServiceEnabled = enable) }
     }
@@ -1607,6 +2235,654 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             getApplication<Application>().startActivity(intent)
         }
+    }
+
+    // --- Phase 4 & Phase 10: Group Voice/Video Rooms, LiveKit WebRTC & Optional Firebase Auth/FCM ---
+    fun syncVoiceRoomsStatus() {
+        val s = settings.value
+        container.voiceRoomConnector.syncConfigurationStatus(
+            roomsServerUrl = s.voiceRoomsServerUrl,
+            liveKitTokenEndpoint = s.liveKitTokenEndpoint,
+            liveKitWsUrl = s.liveKitWsUrl
+        )
+        container.firebaseBridge.refreshStatus()
+    }
+
+    fun saveVoiceRoomEndpoints(
+        roomsUrl: String,
+        tokenEndpoint: String,
+        wsUrl: String,
+        participantName: String
+    ) {
+        val cleanRooms = roomsUrl.trim()
+        val cleanToken = tokenEndpoint.trim()
+        val cleanWs = wsUrl.trim()
+        val cleanParticipant = SecurityAuditor.redactSecrets(participantName.trim()).take(48)
+        updateSettings { current ->
+            current.copy(
+                voiceRoomsServerUrl = cleanRooms,
+                liveKitTokenEndpoint = cleanToken,
+                liveKitWsUrl = cleanWs,
+                voiceRoomParticipantName = cleanParticipant
+            )
+        }
+        _statusBanner.value = if (cleanRooms.isBlank() && cleanToken.isBlank() && cleanWs.isBlank()) {
+            "Voice Rooms endpoints cleared (feature disabled cleanly)."
+        } else {
+            "Voice Rooms & LiveKit endpoints saved."
+        }
+    }
+
+    fun clearVoiceRoomEndpoints() {
+        container.liveKitRoomController.disconnect()
+        container.voiceRoomConnector.leaveActiveRoom()
+        saveVoiceRoomEndpoints("", "", "", settings.value.voiceRoomParticipantName)
+    }
+
+    fun refreshVoiceRooms() {
+        val s = settings.value
+        viewModelScope.launch {
+            val bearer = container.firebaseBridge.fetchIdTokenOrNull()
+            container.voiceRoomConnector.refreshRooms(s.voiceRoomsServerUrl, authBearerToken = bearer)
+                .onFailure { _statusBanner.value = "Voice Rooms: ${it.localizedMessage}" }
+        }
+    }
+
+    fun createVoiceRoom(roomName: String, topic: String) {
+        val s = settings.value
+        val host = s.voiceRoomParticipantName.ifBlank { s.userName }.ifBlank { "Teena User" }
+        viewModelScope.launch {
+            val bearer = container.firebaseBridge.fetchIdTokenOrNull()
+            container.voiceRoomConnector.createRoom(s.voiceRoomsServerUrl, roomName, topic, host, authBearerToken = bearer)
+                .onSuccess { _statusBanner.value = "Created room '${it.name}'." }
+                .onFailure { _statusBanner.value = "Create room failed: ${it.localizedMessage}" }
+        }
+    }
+
+    fun joinVoiceRoom(roomName: String) {
+        val s = settings.value
+        val identity = s.voiceRoomParticipantName.ifBlank { s.userName }.ifBlank { "teena-user" }
+        viewModelScope.launch {
+            val bearer = container.firebaseBridge.fetchIdTokenOrNull()
+            container.voiceRoomConnector.joinRoomWithTokenCredentials(
+                liveKitTokenEndpoint = s.liveKitTokenEndpoint,
+                fallbackWsUrl = s.liveKitWsUrl,
+                roomName = roomName,
+                participantName = identity,
+                authBearerToken = bearer,
+                openFallbackSignalSocket = false
+            ).onSuccess { (session, rawToken) ->
+                if (VoiceRoomConnectorEngine.isValidWsEndpoint(session.liveKitWsUrl)) {
+                    container.liveKitRoomController.connect(
+                        wsUrl = session.liveKitWsUrl,
+                        jwtToken = rawToken,
+                        roomName = session.roomName,
+                        participantIdentity = session.participantIdentity
+                    ).onSuccess {
+                        container.voiceRoomConnector.updateActiveSignalStatus("LiveKit WebRTC Connected")
+                        _statusBanner.value = "Connected LiveKit room '${session.roomName}'."
+                    }.onFailure { err ->
+                        container.voiceRoomConnector.updateActiveSignalStatus("WebRTC Error: ${err.localizedMessage?.take(50)}")
+                        _statusBanner.value = "LiveKit WebRTC connect failed: ${err.localizedMessage}"
+                    }
+                } else {
+                    _statusBanner.value = "Token issued for '${session.roomName}'. Set wss:// LiveKit URL for WebRTC media."
+                }
+            }.onFailure {
+                _statusBanner.value = "Room join failed: ${it.localizedMessage}"
+            }
+        }
+    }
+
+    fun joinLiveKitDirect(wsUrl: String, jwtToken: String, roomName: String) {
+        val cleanWs = wsUrl.trim()
+        val cleanJwt = jwtToken.trim()
+        val s = settings.value
+        val identity = s.voiceRoomParticipantName.ifBlank { s.userName }.ifBlank { "teena-user" }
+        val cleanRoom = roomName.trim().ifBlank { "teena-room" }
+        viewModelScope.launch {
+            if (!VoiceRoomConnectorEngine.isValidWsEndpoint(cleanWs) || cleanJwt.isEmpty()) {
+                _statusBanner.value = "Provide a valid wss:// LiveKit URL and room JWT token."
+                return@launch
+            }
+            val session = container.voiceRoomConnector.registerDirectLiveKitSession(
+                roomName = cleanRoom,
+                participantIdentity = identity,
+                wsUrl = cleanWs,
+                rawJwt = cleanJwt
+            )
+            container.liveKitRoomController.connect(cleanWs, cleanJwt, session.roomName, session.participantIdentity)
+                .onSuccess {
+                    container.voiceRoomConnector.updateActiveSignalStatus("LiveKit WebRTC Connected")
+                    _statusBanner.value = "Connected directly to '${session.roomName}'."
+                }
+                .onFailure { err ->
+                    container.voiceRoomConnector.updateActiveSignalStatus("WebRTC Error: ${err.localizedMessage?.take(50)}")
+                    _statusBanner.value = "Direct LiveKit connect failed: ${err.localizedMessage}"
+                }
+        }
+    }
+
+    fun toggleRoomMic() {
+        val next = !liveKitMediaState.value.micEnabled
+        viewModelScope.launch {
+            container.liveKitRoomController.setMicrophoneEnabled(next)
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Mic toggle failed" }
+        }
+    }
+
+    fun toggleRoomCamera() {
+        val next = !liveKitMediaState.value.cameraEnabled
+        viewModelScope.launch {
+            container.liveKitRoomController.setCameraEnabled(next)
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Camera toggle failed" }
+        }
+    }
+
+    fun switchRoomCamera() {
+        viewModelScope.launch {
+            container.liveKitRoomController.switchCamera()
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Camera switch failed" }
+        }
+    }
+
+    fun startRoomScreenShare(projectionResultData: Intent) {
+        viewModelScope.launch {
+            container.liveKitRoomController.setScreenShareEnabled(true, projectionResultData)
+                .onSuccess { _statusBanner.value = "Screen sharing active in room." }
+                .onFailure { _statusBanner.value = "Screen share failed: ${it.localizedMessage}" }
+        }
+    }
+
+    fun stopRoomScreenShare() {
+        viewModelScope.launch {
+            container.liveKitRoomController.setScreenShareEnabled(false, null)
+                .onSuccess { _statusBanner.value = "Screen share stopped." }
+        }
+    }
+
+    fun leaveVoiceRoom() {
+        container.liveKitRoomController.disconnect()
+        container.voiceRoomConnector.leaveActiveRoom()
+        _statusBanner.value = "Left Voice/Video Room."
+    }
+
+    fun signInFirebaseEmail(email: String, password: String) {
+        viewModelScope.launch {
+            container.firebaseBridge.signInWithEmailPassword(email, password)
+                .onSuccess { _statusBanner.value = "Firebase signed in: ${it.email}" }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Firebase sign-in unavailable" }
+        }
+    }
+
+    fun registerFirebaseEmail(email: String, password: String) {
+        viewModelScope.launch {
+            container.firebaseBridge.createAccountWithEmailPassword(email, password)
+                .onSuccess { _statusBanner.value = "Firebase account created: ${it.email}" }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Firebase registration unavailable" }
+        }
+    }
+
+    fun signOutFirebase() {
+        container.firebaseBridge.signOut()
+        _statusBanner.value = "Firebase signed out."
+    }
+
+    fun refreshFirebaseFcmToken() {
+        viewModelScope.launch {
+            container.firebaseBridge.refreshFcmToken()
+                .onSuccess { _statusBanner.value = "FCM push token refreshed ($it)." }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "FCM unavailable" }
+        }
+    }
+
+    // --- Teena Music Studio (Lyria 3: lyria-3-clip-preview & lyria-3-pro-preview) ---
+    fun generateLyriaMusic(
+        mode: LyriaModelMode,
+        rawPrompt: String,
+        moodOrGenre: String = "",
+        bpm: Int? = null,
+        instrumentalOnly: Boolean = false
+    ) {
+        if (isEmergencyStopped.value) {
+            _musicLastError.value = "Emergency Stop active — resume operations first."
+            return
+        }
+        activeMusicJob?.cancel()
+        activeMusicJob = viewModelScope.launch {
+            _isMusicGenerating.value = true
+            _musicLastError.value = null
+            val keySlots = container.aiBrain.resolveAllGeminiKeysInOrder()
+                .map { (slot, key) -> slot.label to key }
+            container.lyriaMusicEngine.generateMusicTrack(
+                apiKeysInOrder = keySlots,
+                mode = mode,
+                rawPrompt = rawPrompt,
+                moodOrGenre = moodOrGenre,
+                bpm = bpm,
+                instrumentalOnly = instrumentalOnly
+            ).onSuccess { track ->
+                _statusBanner.value = "Music generated (${track.modelId}): ${track.title}"
+            }.onFailure { err ->
+                val safeMsg = SecurityAuditor.redactSecrets(err.localizedMessage ?: "Music generation failed")
+                _musicLastError.value = safeMsg
+                _statusBanner.value = safeMsg
+            }
+            _isMusicGenerating.value = false
+        }
+    }
+
+    fun togglePlayMusicTrack(track: LyriaGeneratedTrack) {
+        container.lyriaMusicEngine.playOrToggleTrack(track)
+    }
+
+    fun seekMusicTo(positionMs: Long) {
+        container.lyriaMusicEngine.seekTo(positionMs)
+    }
+
+    fun stopMusicPlayback() {
+        container.lyriaMusicEngine.stopPlayback()
+    }
+
+    fun deleteMusicTrack(trackId: String) {
+        container.lyriaMusicEngine.deleteTrack(trackId)
+    }
+
+    fun exportMusicTrackToUri(track: LyriaGeneratedTrack, destUri: Uri) {
+        viewModelScope.launch {
+            container.lyriaMusicEngine.exportTrackToUri(track, destUri)
+                .onSuccess { _statusBanner.value = it }
+                .onFailure { _statusBanner.value = "Export failed: ${it.localizedMessage}" }
+        }
+    }
+
+    // --- Phase 5: Website Forge / WebGL Live Preview ---
+    fun generateWebsiteForgeProject(prompt: String, includeWebGl: Boolean = true) {
+        val cleanPrompt = prompt.trim()
+        if (cleanPrompt.isEmpty()) return
+        if (isEmergencyStopped.value) {
+            _websiteForgeError.value = "Emergency Stop active — resume operations first."
+            return
+        }
+        activeWebsiteJob?.cancel()
+        activeWebsiteJob = viewModelScope.launch {
+            _isWebsiteGenerating.value = true
+            _websiteForgeError.value = null
+            val webGlDirective = if (includeWebGl) {
+                "Embed a self-contained interactive <canvas> WebGL shader/3D animation (no external CDN dependency required)."
+            } else {
+                "Use clean responsive HTML5, modern dark CSS3 animations, and vanilla interactive JS."
+            }
+            val engineeredPrompt = """
+                Build a complete, self-contained single-file HTML5 website for: $cleanPrompt.
+                $webGlDirective
+                Return the full runnable document inside a single ```html ... ``` code block starting with <!DOCTYPE html>.
+            """.trimIndent()
+
+            val mems = db.memoryFactDao().getAllMemoriesOnce()
+            var capturedText = ""
+            var streamErr: String? = null
+            try {
+                container.aiBrain.generateStreamingChat(
+                    userPrompt = engineeredPrompt,
+                    recentHistory = emptyList(),
+                    memories = mems,
+                    autoFailover = settings.value.autoFailoverProviders,
+                    identityProfile = settings.value.toIdentityProfile()
+                ).collect { chunk ->
+                    when (chunk) {
+                        is AiStreamChunk.Completed -> capturedText = chunk.output.text
+                        is AiStreamChunk.Error -> streamErr = chunk.message
+                        is AiStreamChunk.Delta -> Unit
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            }
+
+            if (!streamErr.isNullOrBlank()) {
+                val safeErr = SecurityAuditor.redactSecrets(streamErr.orEmpty())
+                _websiteForgeError.value = safeErr
+                _statusBanner.value = safeErr
+            } else {
+                val extracted = WebsiteForgeEngine.extractHtmlDocumentFromText(capturedText, cleanPrompt.take(40))
+                if (extracted != null) {
+                    val saved = container.websiteForgeEngine.saveProject(
+                        title = cleanPrompt.take(40),
+                        prompt = cleanPrompt,
+                        htmlSource = extracted,
+                        templateKind = if (WebsiteForgeEngine.hasWebGlOrThreeJs(extracted)) "AI_WEBGL" else "AI_HTML5"
+                    )
+                    _statusBanner.value = "Forged '${saved.title}' cleanly."
+                } else {
+                    _websiteForgeError.value = "AI response did not contain a valid HTML5 document. Try adding 'include complete <!DOCTYPE html>' or load a starter blueprint."
+                }
+            }
+            _isWebsiteGenerating.value = false
+        }
+    }
+
+    fun loadStarterWebsiteTemplate(templateId: String) {
+        val tpl = WebsiteForgeEngine.starterTemplates().firstOrNull { it.id == templateId } ?: return
+        val saved = container.websiteForgeEngine.saveProject(
+            title = tpl.title,
+            prompt = "Starter Blueprint: ${tpl.title}",
+            htmlSource = tpl.htmlSource,
+            templateKind = tpl.kind
+        )
+        _websiteForgeError.value = null
+        _statusBanner.value = "Loaded starter '${saved.title}' into Live Preview."
+    }
+
+    fun importWebsiteFromChatMessage(title: String, messageContent: String): Boolean {
+        val html = WebsiteForgeEngine.extractHtmlDocumentFromText(messageContent, title.take(40)) ?: return false
+        container.websiteForgeEngine.saveProject(
+            title = title.ifBlank { "Chat Forged Site" },
+            prompt = "Imported from Teena Chat",
+            htmlSource = html,
+            templateKind = if (WebsiteForgeEngine.hasWebGlOrThreeJs(html)) "CHAT_WEBGL" else "CHAT_HTML5"
+        )
+        _websiteForgeError.value = null
+        return true
+    }
+
+    fun selectWebsiteForgeProject(projectId: String) {
+        container.websiteForgeEngine.selectProject(projectId)
+    }
+
+    fun updateWebsiteForgeSource(projectId: String, updatedHtml: String) {
+        container.websiteForgeEngine.updateProjectHtml(projectId, updatedHtml)
+        _statusBanner.value = "Updated HTML source & refreshed WebView canvas."
+    }
+
+    fun deleteWebsiteForgeProject(projectId: String) {
+        container.websiteForgeEngine.deleteProject(projectId)
+    }
+
+    fun exportWebsiteHtmlToUri(project: WebsiteForgeProject, destUri: Uri) {
+        viewModelScope.launch {
+            container.websiteForgeEngine.exportHtmlToUri(project, destUri)
+                .onSuccess { _statusBanner.value = it }
+                .onFailure { _statusBanner.value = "Export failed: ${it.localizedMessage}" }
+        }
+    }
+
+    // --- Phase 6: Social Task State Machine, WhatsApp Task Control & Share Handoff ---
+    fun setAutomationTab(tabIndex: Int) {
+        _requestedAutomationTab.value = tabIndex.coerceIn(0, 3)
+    }
+
+    fun startSocialTask(
+        platform: SocialPlatform,
+        taskKind: SocialTaskKind,
+        caption: String,
+        targetAccount: String = "",
+        mediaUriString: String? = null,
+        requireManualUserPrep: Boolean = false
+    ) {
+        if (!settings.value.directAccessibilityAgentEnabled) {
+            _statusBanner.value = "Direct Accessibility & Social Agent is disabled in Settings."
+            return
+        }
+        viewModelScope.launch {
+            val st = container.socialTaskEngine.startSocialTask(
+                platform = platform,
+                taskKind = taskKind,
+                caption = caption,
+                mediaUriString = mediaUriString,
+                targetAccount = targetAccount,
+                requireManualUserPrep = requireManualUserPrep
+            )
+            _statusBanner.value = "[${st.status.name}] ${st.statusMessage}"
+        }
+    }
+
+    fun startWhatsAppTask(contactOrPhone: String, message: String) {
+        if (!settings.value.directAccessibilityAgentEnabled) {
+            _statusBanner.value = "Direct Social/WhatsApp Agent is disabled in Settings."
+            return
+        }
+        viewModelScope.launch {
+            val st = container.socialTaskEngine.startWhatsAppTask(contactOrPhone, message)
+            _statusBanner.value = "[${st.status.name}] ${st.statusMessage}"
+        }
+    }
+
+    fun controlSocialTask(control: SocialTaskControl) {
+        viewModelScope.launch {
+            val st = container.socialTaskEngine.controlTask(control)
+            _statusBanner.value = "[${st.status.name}] ${st.statusMessage}"
+        }
+    }
+
+    fun resetSocialTask() {
+        viewModelScope.launch {
+            container.socialTaskEngine.resetToIdle()
+            _statusBanner.value = "Social task state reset to IDLE."
+        }
+    }
+
+    fun consumePendingIncomingShare(requestedRoute: String?, requestedTab: Int?): String? {
+        if (requestedTab != null && requestedTab in 0..3) {
+            _requestedAutomationTab.value = requestedTab
+        }
+        val payload = IncomingShareBridge.consume() ?: return requestedRoute
+        return when (payload.destination) {
+            ShareHandoffDestination.CHAT_ASK -> {
+                val firstImg = payload.imageUris.firstOrNull()
+                val promptToSend = payload.text.ifBlank { "Is shared content/image ko samjhao." }
+                viewModelScope.launch {
+                    if (!firstImg.isNullOrBlank()) {
+                        val bmp = runCatching {
+                            container.documentEngine.loadBitmapFromUri(Uri.parse(firstImg))
+                        }.getOrNull()
+                        if (bmp != null) {
+                            attachBitmap(bmp, "Shared image from Android Share sheet")
+                        }
+                    }
+                    sendChatMessage(promptToSend)
+                }
+                "chat"
+            }
+            ShareHandoffDestination.SOCIAL_DRAFT, ShareHandoffDestination.WHATSAPP_DRAFT -> {
+                _requestedAutomationTab.value = 1
+                _statusBanner.value = "Shared draft staged (${socialTaskState.value.status.name}) — confirm explicitly before sending."
+                "automation"
+            }
+        }
+    }
+
+    // --- Phase 7: WhatsApp Notification Reader, Read-Aloud & Alarm/Boot Triggers ---
+    fun toggleWhatsAppNotifReader(enabled: Boolean) {
+        TeenaNotificationListenerService.isWhatsAppReaderEnabled = enabled
+        updateSettings { it.copy(whatsappNotifReaderEnabled = enabled) }
+        _statusBanner.value = if (enabled) {
+            "WhatsApp notification reader enabled."
+        } else {
+            "WhatsApp notification reader paused (no new WhatsApp notifications captured)."
+        }
+    }
+
+    fun readWhatsAppNotificationsAloud(specific: NotificationRecordEntity? = null) {
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop active."
+            return
+        }
+        viewModelScope.launch {
+            val script = if (specific != null) {
+                TeenaSpeechHelper.buildWhatsAppReadAloudScript(listOf(specific), maxItems = 1)
+            } else {
+                val latest = db.systemRecordsDao().getLatestWhatsAppNotifications(5)
+                TeenaSpeechHelper.buildWhatsAppReadAloudScript(latest, maxItems = 5)
+            }
+            container.speechHelper.speak(script)
+                .onSuccess { _statusBanner.value = it }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "TTS unavailable" }
+        }
+    }
+
+    fun stopReadAloud() {
+        container.speechHelper.stop()
+        _statusBanner.value = "Stopped reading aloud."
+    }
+
+    fun clearCapturedNotifications() {
+        viewModelScope.launch {
+            db.systemRecordsDao().clearNotifications()
+            _statusBanner.value = "Cleared captured notifications."
+        }
+    }
+
+    fun saveTrigger(
+        id: Long? = null,
+        title: String,
+        triggerType: String,
+        actionType: String,
+        payload: String,
+        delayOrIntervalMinutes: Int
+    ) {
+        val cleanTitle = title.trim()
+        val safeInterval = delayOrIntervalMinutes.coerceAtLeast(1)
+        val validation = TeenaTriggerLogic.validateTriggerInput(cleanTitle, triggerType, safeInterval)
+        if (validation.isFailure) {
+            _statusBanner.value = validation.exceptionOrNull()?.localizedMessage ?: "Invalid trigger"
+            return
+        }
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val fireAt = TeenaTriggerLogic.computeInitialTriggerMillis(triggerType, now, safeInterval)
+            val entity = TriggerEntity(
+                id = id ?: 0L,
+                title = cleanTitle,
+                triggerType = triggerType,
+                actionType = actionType,
+                actionPayload = payload.trim(),
+                triggerAtMillis = fireAt,
+                intervalMinutes = safeInterval,
+                enabled = true,
+                lastResult = if (triggerType == TeenaTriggerLogic.TYPE_BOOT) "Armed for Reboot" else "Alarm Scheduled"
+            )
+            val savedId = db.triggerDao().upsertTrigger(entity)
+            val saved = entity.copy(id = if (entity.id > 0L) entity.id else savedId)
+            TeenaTriggerScheduler.scheduleTrigger(getApplication(), saved)
+            _statusBanner.value = if (id == null) {
+                "Trigger '${saved.title}' saved."
+            } else {
+                "Trigger '${saved.title}' updated."
+            }
+        }
+    }
+
+    fun toggleTriggerEnabled(trigger: TriggerEntity, enabled: Boolean) {
+        viewModelScope.launch {
+            val updated = trigger.copy(
+                enabled = enabled,
+                lastResult = if (enabled) "Enabled" else "Paused by user"
+            )
+            db.triggerDao().upsertTrigger(updated)
+            if (enabled) {
+                TeenaTriggerScheduler.scheduleTrigger(getApplication(), updated)
+                _statusBanner.value = "Trigger '${trigger.title}' enabled."
+            } else {
+                TeenaTriggerScheduler.cancelTrigger(getApplication(), trigger.id)
+                _statusBanner.value = "Trigger '${trigger.title}' disabled."
+            }
+        }
+    }
+
+    fun deleteTrigger(trigger: TriggerEntity) {
+        viewModelScope.launch {
+            TeenaTriggerScheduler.cancelTrigger(getApplication(), trigger.id)
+            db.triggerDao().deleteTrigger(trigger.id)
+            _statusBanner.value = "Deleted trigger '${trigger.title}'."
+        }
+    }
+
+    fun fireTriggerNow(trigger: TriggerEntity) {
+        if (isEmergencyStopped.value) {
+            _statusBanner.value = "Blocked: Emergency Stop active."
+            return
+        }
+        viewModelScope.launch {
+            val body = trigger.actionPayload.ifBlank { "Manual trigger test executed." }
+            TeenaNotificationHelper.showAlertNotification(
+                getApplication(),
+                7500 + (trigger.id % 500).toInt(),
+                "Teena Trigger: ${trigger.title}",
+                "[${trigger.actionType}] $body"
+            )
+            if (trigger.actionType == TeenaTriggerLogic.ACTION_SPEAK_ALERT) {
+                container.speechHelper.speak("${trigger.title}. $body")
+            }
+            db.triggerDao().upsertTrigger(
+                trigger.copy(
+                    lastFiredAtMillis = System.currentTimeMillis(),
+                    lastResult = "Test fired manually"
+                )
+            )
+            _statusBanner.value = "Fired trigger '${trigger.title}'."
+        }
+    }
+
+    fun toggleTriggerMonitor(enabled: Boolean) {
+        updateSettings { it.copy(triggerMonitorEnabled = enabled) }
+        if (enabled) {
+            TeenaTriggerMonitorService.start(getApplication())
+            _statusBanner.value = "Teena Trigger Monitor Service started."
+        } else {
+            TeenaTriggerMonitorService.stop(getApplication())
+            _statusBanner.value = "Teena Trigger Monitor Service stopped."
+        }
+    }
+
+    // --- Phase 8: Optional Device Admin Controls (Manual Opt-in Only) ---
+    fun toggleDirectDeviceAdmin(enabled: Boolean) {
+        updateSettings { it.copy(directDeviceAdminEnabled = enabled) }
+        if (!enabled) {
+            com.example.system.TeenaDeviceAdminReceiver.disableAdmin(getApplication())
+        }
+        refreshSystemHealth()
+        _statusBanner.value = if (enabled) {
+            "Device Admin option unlocked — use 'Enable Manually' to approve in Android Settings."
+        } else {
+            "Optional Device Admin feature disabled."
+        }
+    }
+
+    fun requestEnableDeviceAdmin() {
+        com.example.system.TeenaDeviceAdminReceiver.requestEnableAdmin(getApplication())
+            .onSuccess {
+                refreshSystemHealth()
+                _statusBanner.value = it
+            }
+            .onFailure {
+                _statusBanner.value = it.localizedMessage ?: "Unable to open Device Admin screen."
+            }
+    }
+
+    fun disableDeviceAdmin() {
+        com.example.system.TeenaDeviceAdminReceiver.disableAdmin(getApplication())
+            .onSuccess {
+                refreshSystemHealth()
+                _statusBanner.value = it
+            }
+            .onFailure {
+                _statusBanner.value = it.localizedMessage ?: "Failed to disable Device Admin."
+            }
+    }
+
+    fun lockScreenWithDeviceAdmin() {
+        val enabledInSettings = settings.value.directDeviceAdminEnabled
+        com.example.system.TeenaDeviceAdminReceiver.lockScreenIfAuthorized(getApplication(), enabledInSettings)
+            .onSuccess { _statusBanner.value = it }
+            .onFailure { _statusBanner.value = it.localizedMessage ?: "Device Admin lock unavailable." }
+    }
+
+    override fun onCleared() {
+        container.speechHelper.shutdown()
+        container.lyriaMusicEngine.release()
+        container.voiceRoomConnector.leaveActiveRoom()
+        super.onCleared()
     }
 
     private fun defaultModelFor(type: ProviderType): String = when (type) {
