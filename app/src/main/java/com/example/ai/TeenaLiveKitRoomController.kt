@@ -9,12 +9,11 @@ import com.example.core.security.EmergencyStopController
 import com.example.core.security.SecurityAuditor
 import com.example.system.TeenaScreenShareService
 import io.livekit.android.LiveKit
+import io.livekit.android.events.RoomEvent
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.Room
-import io.livekit.android.room.RoomEvent
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
-import io.livekit.android.room.track.LocalVideoTrackOptions
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import io.livekit.android.room.track.screencapture.ScreenCaptureParams
@@ -103,7 +102,7 @@ class TeenaLiveKitRoomController(
             room = liveKitRoom
 
             eventsJob = scope.launch {
-                liveKitRoom.events.collect { event ->
+                liveKitRoom.events.events.collect { event: RoomEvent ->
                     handleRoomEvent(liveKitRoom, event)
                 }
             }
@@ -168,10 +167,11 @@ class TeenaLiveKitRoomController(
             }
             val r = room ?: throw IllegalStateException("Join an active LiveKit room first.")
             val pos = if (_state.value.useFrontCamera) CameraPosition.FRONT else CameraPosition.BACK
-            r.localParticipant.setCameraEnabled(
-                enabled = enabled,
-                options = LocalVideoTrackOptions(position = pos)
-            )
+            r.localParticipant.setCameraEnabled(enabled)
+            if (enabled) {
+                val localTrack = r.localParticipant.getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack
+                localTrack?.switchCamera(position = pos)
+            }
             refreshSnapshot(r, statusMessage = if (enabled) "Camera video publishing" else "Camera stopped")
             enabled
         }
@@ -184,13 +184,9 @@ class TeenaLiveKitRoomController(
             val r = room ?: return@runCatching nextFront
             val camPub = r.localParticipant.getTrackPublication(Track.Source.CAMERA)
             val localTrack = camPub?.track as? LocalVideoTrack
-            if (localTrack != null) {
-                localTrack.restartTrack(
-                    LocalVideoTrackOptions(
-                        position = if (nextFront) CameraPosition.FRONT else CameraPosition.BACK
-                    )
-                )
-            }
+            localTrack?.switchCamera(
+                position = if (nextFront) CameraPosition.FRONT else CameraPosition.BACK
+            )
             refreshSnapshot(r, statusMessage = "Switched to ${if (nextFront) "Front" else "Rear"} camera")
             nextFront
         }
