@@ -56,6 +56,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.RoutingCostStrategy
 import com.example.ai.TeenaIdentityEngine
 import com.example.ai.WebsiteForgeEngine
 import com.example.ui.components.RichMathChatText
@@ -79,7 +80,9 @@ fun ChatScreen(
     val attachedNote by viewModel.attachedDocNote.collectAsStateWithLifecycle()
     val websiteForgeIntent by viewModel.websiteForgeIntent.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val routerDecision by viewModel.lastRouterDecision.collectAsStateWithLifecycle()
     val activePreset = TeenaIdentityEngine.presetFor(settings.personalityId)
+    val activeStrategy = RoutingCostStrategy.fromString(settings.routingCostStrategy)
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -121,6 +124,17 @@ fun ChatScreen(
             StatusPill(
                 status = activePreset.title,
                 modifier = Modifier.testTag("chat_active_persona_pill")
+            )
+            val decision = routerDecision
+            val routerChipText = when {
+                !settings.dynamicPromptRoutingEnabled -> "Router: Manual"
+                decision != null -> "${decision.selectedProvider.displayName} • ${decision.evaluation.complexityTier.name}"
+                else -> "Route: ${activeStrategy.name.replace("_", " ")}"
+            }
+            AssistChip(
+                onClick = { viewModel.cycleRoutingCostStrategy() },
+                label = { Text(routerChipText, maxLines = 1, softWrap = false) },
+                modifier = Modifier.testTag("chat_router_pill")
             )
             conversations.forEach { conv ->
                 val selected = conv.id == activeId

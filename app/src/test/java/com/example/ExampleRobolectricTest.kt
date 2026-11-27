@@ -20,10 +20,14 @@ import android.content.pm.PackageManager
 import androidx.camera.core.ImageProxy
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.isSelected
+import com.example.system.DevStudioEngine
+import com.example.system.DevStudioPhase
 import com.example.system.SketchFileProvider
 import com.example.system.SketchPoint
 import com.example.system.SketchStroke
 import com.example.system.TeenaBootReceiver
+import com.example.system.TeenaDevStudioService
 import com.example.system.TeenaDeviceAdminReceiver
 import com.example.system.TeenaFaceDetectionEngine
 import com.example.system.TeenaFirebaseBridge
@@ -32,6 +36,7 @@ import com.example.system.TeenaKeyboardService
 import com.example.system.TeenaScreenShareService
 import com.example.system.TransientFaceDetectionState
 import com.example.ui.ShareToTeenaActivity
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -405,7 +410,7 @@ class ExampleRobolectricTest {
         }
         disabledAnalyzer.analyze(fakeProxy)
         assertEquals(2, closedCount)
-        val disabledState = lastState!!
+        val disabledState = requireNotNull(lastState)
         assertFalse(disabledState.enabled)
         assertTrue(disabledState.permissionGranted)
         engine.closeDetector()
@@ -455,6 +460,12 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("hub_tile_voice_rooms").performClick()
         composeRule.waitForIdle()
 
+        composeRule.onNodeWithTag("voice_rooms_list").performScrollToNode(hasTestTag("livekit_diagnostics_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("livekit_diag_status_pill").assertTextContains("DISCONNECTED", substring = true)
+        composeRule.onNodeWithTag("livekit_diag_quality_label").assertTextContains("UNKNOWN", substring = true)
+        composeRule.onNodeWithTag("livekit_diag_participant_count").assertTextContains("0 active", substring = true)
+
         composeRule.onNodeWithTag("voice_rooms_list").performScrollToNode(hasTestTag("voice_rooms_refresh_btn"))
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("voice_rooms_refresh_btn").assertIsNotEnabled()
@@ -465,6 +476,129 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("rooms_firebase_status_pill").assertTextContains("DISABLED", substring = true)
         composeRule.onNodeWithTag("rooms_firebase_signin_btn").assertIsNotEnabled()
         composeRule.onNodeWithTag("rooms_firebase_fcm_btn").assertIsNotEnabled()
+    }
+
+    @Test
+    fun phase11ADevStudioSetupWizardAndServiceWorkWithoutCrash() = kotlinx.coroutines.test.runTest {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Foreground service notification builds cleanly
+        val fgNotif = TeenaDevStudioService.buildOngoingNotification(ctx, "Downloading rootfs 50%")
+        assertNotNull(fgNotif)
+
+        // 2. DevStudioEngine inspects nativeLibraryDir gracefully (no crash when libproot.so absent),
+        // enforces sandbox boundaries, and runs autoRepair()
+        val engine = DevStudioEngine(ctx, OkHttpClient())
+        val initial = engine.state.value
+        assertEquals(DevStudioPhase.UNINSTALLED, initial.phase)
+        assertFalse(initial.nativeBinaries.hasProot)
+        assertTrue(engine.createSandboxFile("hello_test.py", "print('hi')").isSuccess)
+        assertTrue(engine.createSandboxFile("../escape.py", "nope").isFailure)
+
+        val repairRes = engine.autoRepair()
+        assertTrue(repairRes.isSuccess)
+        assertTrue(engine.state.value.bridgeStatus.isRunning)
+        val pingRes = engine.pingBridge()
+        assertTrue(pingRes.isSuccess)
+
+        // Phase 11: sandbox CRUD + built-in terminal commands
+        val touchRes = engine.runSandboxCommand("touch demo.py").getOrThrow()
+        assertEquals(0, touchRes.exitCode)
+        engine.saveSandboxFile("demo.py", "print('phase11')\n").getOrThrow()
+        val catRes = engine.runSandboxCommand("cat demo.py").getOrThrow()
+        assertEquals(0, catRes.exitCode)
+        assertTrue(catRes.output.contains("phase11"))
+        val envRes = engine.runSandboxCommand("env").getOrThrow()
+        assertTrue(envRes.output.contains("Phase 11"))
+
+        engine.stopBridge()
+        engine.killAllProcesses()
+
+        // 3. Navigate via Hub -> Dev Studio screen and verify Setup Wizard, Bridge, Editor, AI Co-Pilot & Terminal
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_dev_studio"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_dev_studio").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("dev_studio_status_pill").assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_install_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_repair_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_kill_btn").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_proot_pill"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_proot_pill").assertTextContains("SANDBOX FALLBACK", substring = true)
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_bridge_toggle_btn"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_bridge_toggle_btn").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("dev_studio_bridge_pill") and hasText("LISTENING", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("dev_studio_bridge_pill").assertTextContains("LISTENING", substring = true)
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_create_file_btn"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_create_file_btn").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_workspace_file_sandbox_test.py").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_editor_title").performScrollTo().assertTextContains("sandbox_test.py", substring = true)
+
+        // Phase 11 AI Co-Pilot router pill & Sandbox Terminal
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_ai_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_router_pill").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_terminal_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_term_preset_ls").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("dev_studio_terminal_output") and hasText("sandbox_test.py", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("dev_studio_terminal_output").assertTextContains("sandbox_test.py", substring = true)
+    }
+
+    @Test
+    fun routerUiShowsPillInChatAndStrategyChipsInSettings() {
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav_chat").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("chat_router_pill").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_router_pill").assertTextContains("BALANCED", substring = true)
+        composeRule.onNodeWithTag("chat_router_pill").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("chat_router_pill") and hasText("COST FIRST", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("chat_router_pill").assertTextContains("COST FIRST", substring = true)
+
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_settings"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_settings").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("settings_list").performScrollToNode(hasTestTag("settings_router_strategy_quality_first"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_router_strategy_quality_first").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("settings_router_strategy_quality_first") and isSelected())
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag("nav_chat").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("chat_router_pill") and hasText("QUALITY FIRST", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("chat_router_pill").assertTextContains("QUALITY FIRST", substring = true)
     }
 }
 

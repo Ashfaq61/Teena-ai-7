@@ -7,6 +7,7 @@ import com.example.ai.LiveSocialTaskDriver
 import com.example.ai.LyriaMusicEngine
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
+import com.example.ai.Router
 import com.example.ai.SafeToolInterpreter
 import com.example.ai.ScreenVisionAgentEngine
 import com.example.ai.SocialTaskEngine
@@ -22,6 +23,7 @@ import com.example.data.local.TeenaPreferences
 import com.example.data.remote.TeenaNetworkClients
 import com.example.system.ApkBuildEngine
 import com.example.system.CameraMediaEngine
+import com.example.system.DevStudioEngine
 import com.example.system.DocumentKnowledgeEngine
 import com.example.system.MapsLocationEngine
 import com.example.system.PermissionStatusManager
@@ -70,9 +72,14 @@ class TeenaServiceContainer(context: Context) {
     val speechHelper: TeenaSpeechHelper by lazy {
         TeenaSpeechHelper(appContext)
     }
+    val devStudioEngine: DevStudioEngine by lazy {
+        DevStudioEngine(appContext, networkClients.httpClient, emergencyStopController)
+    }
+
+    val promptRouter: Router by lazy { Router() }
 
     val aiBrain: AiBrainEngine by lazy {
-        AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController)
+        AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController, promptRouter)
     }
 
     val externalAgentHub: ExternalAgentHub by lazy {

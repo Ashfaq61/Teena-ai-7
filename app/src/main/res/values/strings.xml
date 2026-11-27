@@ -15,5 +15,8 @@
     <string name="device_admin_description">Optional user-enabled administrator access allowing Teena AI to lock the device screen when explicitly requested.</string>
     <string name="screen_share_notif_title">Teena Screen Share Active</string>
     <string name="screen_share_notif_body">Sharing device screen in LiveKit room. Tap Stop Share anytime.</string>
+    <string name="dev_studio_channel_name">Teena Dev Studio</string>
+    <string name="dev_studio_notif_title">Teena Dev Studio Engine Active</string>
+    <string name="dev_studio_notif_body">Sandbox rootfs &amp; IDE bridge active. Tap Kill Tasks to stop.</string>
 </resources>
 

@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.ai.RoutingCostStrategy
 import com.example.ai.TeenaIdentityEngine
 import com.example.ai.TeenaIdentityProfile
 import kotlinx.coroutines.flow.Flow
@@ -54,7 +55,10 @@ data class TeenaSettings(
     val whatsappNotifReaderEnabled: Boolean = true,
     val triggerMonitorEnabled: Boolean = false,
     // Phase 8: Optional Device Admin opt-in toggle (default OFF; user must also enable in Android Settings)
-    val directDeviceAdminEnabled: Boolean = false
+    val directDeviceAdminEnabled: Boolean = false,
+    // Dynamic Prompt Router (Gemini / Groq / OpenRouter)
+    val dynamicPromptRoutingEnabled: Boolean = true,
+    val routingCostStrategy: String = RoutingCostStrategy.BALANCED.name
 )
 
 fun TeenaSettings.toIdentityProfile(): TeenaIdentityProfile = TeenaIdentityProfile(
@@ -104,6 +108,8 @@ class TeenaPreferences(private val context: Context) {
         val WHATSAPP_NOTIF_READER_ENABLED = booleanPreferencesKey("whatsapp_notif_reader_enabled")
         val TRIGGER_MONITOR_ENABLED = booleanPreferencesKey("trigger_monitor_enabled")
         val DIRECT_DEVICE_ADMIN_ENABLED = booleanPreferencesKey("direct_device_admin_enabled")
+        val DYNAMIC_PROMPT_ROUTING_ENABLED = booleanPreferencesKey("dynamic_prompt_routing_enabled")
+        val ROUTING_COST_STRATEGY = stringPreferencesKey("routing_cost_strategy")
     }
 
     val settingsFlow: Flow<TeenaSettings> = context.teenaDataStore.data.map { prefs ->
@@ -141,7 +147,9 @@ class TeenaPreferences(private val context: Context) {
             directAccessibilityAgentEnabled = prefs[Keys.DIRECT_ACCESSIBILITY_AGENT_ENABLED] ?: true,
             whatsappNotifReaderEnabled = prefs[Keys.WHATSAPP_NOTIF_READER_ENABLED] ?: true,
             triggerMonitorEnabled = prefs[Keys.TRIGGER_MONITOR_ENABLED] ?: false,
-            directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false
+            directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false,
+            dynamicPromptRoutingEnabled = prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] ?: true,
+            routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name
         )
     }
 
@@ -183,7 +191,9 @@ class TeenaPreferences(private val context: Context) {
                 directAccessibilityAgentEnabled = prefs[Keys.DIRECT_ACCESSIBILITY_AGENT_ENABLED] ?: true,
                 whatsappNotifReaderEnabled = prefs[Keys.WHATSAPP_NOTIF_READER_ENABLED] ?: true,
                 triggerMonitorEnabled = prefs[Keys.TRIGGER_MONITOR_ENABLED] ?: false,
-                directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false
+                directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false,
+                dynamicPromptRoutingEnabled = prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] ?: true,
+                routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name
             )
             val next = transform(current)
             prefs[Keys.DARK_THEME] = next.darkTheme
@@ -220,6 +230,8 @@ class TeenaPreferences(private val context: Context) {
             prefs[Keys.WHATSAPP_NOTIF_READER_ENABLED] = next.whatsappNotifReaderEnabled
             prefs[Keys.TRIGGER_MONITOR_ENABLED] = next.triggerMonitorEnabled
             prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] = next.directDeviceAdminEnabled
+            prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] = next.dynamicPromptRoutingEnabled
+            prefs[Keys.ROUTING_COST_STRATEGY] = next.routingCostStrategy
         }
     }
 }

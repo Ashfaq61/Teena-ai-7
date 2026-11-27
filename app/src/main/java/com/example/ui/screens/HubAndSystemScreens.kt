@@ -5,6 +5,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Alarm
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Web
 import androidx.compose.material3.Button
@@ -94,6 +97,7 @@ fun HubDirectoryScreen(onNavigate: (String) -> Unit) {
         HubTile("research", "Research Center", "GitHub, HuggingFace, Web & PDFs", Icons.Default.Science),
         HubTile("api_manager", "API Manager", "Gemini, Groq, OpenRouter & Keystore", Icons.Default.Key),
         HubTile("memory", "Memory & History", "Long-term knowledge & SAF Backups", Icons.Default.History),
+        HubTile("dev_studio", "Dev Studio", "Phase 11 Linux sandbox, AI coder, editor & terminal", Icons.Default.Terminal),
         HubTile("build_center", "APK Build Center", "Signed APK check & GitHub Actions", Icons.Default.Build),
         HubTile("notifications", "Notifications", "WhatsApp reader, read aloud & reminders", Icons.Default.Notifications),
         HubTile("triggers", "Triggers & Keyboard", "Alarm/Boot triggers, monitor & Teena IME", Icons.Default.Alarm),
@@ -473,7 +477,7 @@ fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().testTag("settings_list"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -613,6 +617,43 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.size(6.dp))
                     Text(if (emergencyStopped) "Resume Operations" else "EMERGENCY STOP (Halt All Automation & Calls)")
+                }
+            }
+        }
+
+        item {
+            NeuralCard {
+                SectionHeader(
+                    title = "Dynamic Prompt Router",
+                    subtitle = "Evaluates prompt complexity & cost across Gemini, Groq, and OpenRouter",
+                    trailing = { StatusPill(if (settings.dynamicPromptRoutingEnabled) "ACTIVE" else "MANUAL") }
+                )
+                SettingToggleRow(
+                    "Dynamic Prompt Router (Complexity & Cost)",
+                    "Automatically orders configured cloud providers per prompt",
+                    settings.dynamicPromptRoutingEnabled
+                ) { v ->
+                    viewModel.updateSettings { it.copy(dynamicPromptRoutingEnabled = v) }
+                }
+                Text("Routing Cost Strategy", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    com.example.ai.RoutingCostStrategy.entries.forEach { strat ->
+                        FilterChip(
+                            selected = settings.routingCostStrategy == strat.name,
+                            onClick = { viewModel.updateSettings { it.copy(routingCostStrategy = strat.name) } },
+                            label = {
+                                Text(
+                                    strat.name.replace("_", " "),
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            },
+                            modifier = Modifier.testTag("settings_router_strategy_${strat.name.lowercase()}")
+                        )
+                    }
                 }
             }
         }

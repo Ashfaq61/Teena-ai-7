@@ -22,6 +22,8 @@ import com.example.ai.LyriaGeneratedTrack
 import com.example.ai.LyriaModelMode
 import com.example.ai.LyriaPlaybackState
 import com.example.ai.PendingScreenActionConfirmation
+import com.example.ai.RouterDecision
+import com.example.ai.RoutingCostStrategy
 import com.example.ai.ScreenWatchIndicatorState
 import com.example.ai.SocialTaskControl
 import com.example.ai.SocialTaskKind
@@ -66,6 +68,7 @@ import com.example.data.remote.WebSearchResult
 import com.example.system.AutomationResult
 import com.example.system.CallLogSummary
 import com.example.system.ContactEntry
+import com.example.system.DevStudioEngineState
 import com.example.system.DeviceLocationInfo
 import com.example.system.FirebaseRoomAuthState
 import com.example.system.InstalledApkInspection
@@ -256,6 +259,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private var activeScreenJob: Job? = null
     private var activeMusicJob: Job? = null
     private var activeWebsiteJob: Job? = null
+    private var activeDevStudioAiJob: Job? = null
 
     private val _screenVisionAnswer = MutableStateFlow("")
     val screenVisionAnswer: StateFlow<String> = _screenVisionAnswer.asStateFlow()
@@ -267,6 +271,20 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     val voiceRoomsState: StateFlow<VoiceRoomsConnectorState> = container.voiceRoomConnector.state
     val liveKitMediaState: StateFlow<LiveKitMediaState> = container.liveKitRoomController.state
     val firebaseAuthState: StateFlow<FirebaseRoomAuthState> = container.firebaseBridge.state
+
+    // Phase 11: Dev Studio Engine (Linux inside Teena, Sandbox Editor, Terminal & AI Co-Pilot)
+    val devStudioState: StateFlow<DevStudioEngineState> = container.devStudioEngine.state
+    private val _devStudioAiReply = MutableStateFlow("")
+    val devStudioAiReply: StateFlow<String> = _devStudioAiReply.asStateFlow()
+    private val _devStudioAiError = MutableStateFlow<String?>(null)
+    val devStudioAiError: StateFlow<String?> = _devStudioAiError.asStateFlow()
+    private val _isDevStudioAiBusy = MutableStateFlow(false)
+    val isDevStudioAiBusy: StateFlow<Boolean> = _isDevStudioAiBusy.asStateFlow()
+    private val _devStudioRouterDecision = MutableStateFlow<RouterDecision?>(null)
+    val devStudioRouterDecision: StateFlow<RouterDecision?> = _devStudioRouterDecision.asStateFlow()
+
+    // Dynamic Prompt Router telemetry (Gemini / Groq / OpenRouter)
+    val lastRouterDecision: StateFlow<RouterDecision?> = container.aiBrain.lastRouterDecision
 
     // Music Studio (Lyria 3: lyria-3-clip-preview / lyria-3-pro-preview)
     val musicTracks: StateFlow<List<LyriaGeneratedTrack>> = container.lyriaMusicEngine.tracks
@@ -415,6 +433,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         container.liveKitRoomController.disconnect()
         container.voiceRoomConnector.leaveActiveRoom()
         container.lyriaMusicEngine.stopPlayback()
+        container.devStudioEngine.killAllProcesses()
+        container.devStudioEngine.stopBridge()
         container.networkClients.httpClient.dispatcher.cancelAll()
         activeMissionJob?.cancel()
         activePipelineJob?.cancel()
@@ -646,20 +666,26 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             _chatStreamingText.value = ""
 
             val recent = messages.value.takeLast(12).map { it.role to it.content }
+            val activeSettings = settings.value
             try {
                 container.aiBrain.generateStreamingChat(
                     userPrompt = fullPrompt,
                     recentHistory = recent,
                     memories = mems,
                     attachedImage = img,
-                    autoFailover = settings.value.autoFailoverProviders,
-                    identityProfile = settings.value.toIdentityProfile()
+                    autoFailover = activeSettings.autoFailoverProviders,
+                    identityProfile = activeSettings.toIdentityProfile(),
+                    dynamicRouting = activeSettings.dynamicPromptRoutingEnabled,
+                    routingStrategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy)
                 ).collect { chunk ->
                     when (chunk) {
                         is AiStreamChunk.Delta -> _chatStreamingText.value = chunk.accumulatedText
                         is AiStreamChunk.Completed -> {
                             _chatStreamingText.value = ""
                             _chatIsLoading.value = false
+                            val combinedCitations = listOf(chunk.output.routingSummary, chunk.output.failoverNotes)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" | ")
                             db.conversationDao().insertMessage(
                                 MessageEntity(
                                     conversationId = convId,
@@ -669,7 +695,7 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                                     modelUsed = chunk.output.modelUsed,
                                     detectedLanguage = chunk.output.detectedLanguage,
                                     latencyMs = chunk.output.latencyMs,
-                                    citations = chunk.output.failoverNotes
+                                    citations = combinedCitations
                                 )
                             )
                             db.conversationDao().updateConversationMeta(
@@ -2522,13 +2548,16 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             val mems = db.memoryFactDao().getAllMemoriesOnce()
             var capturedText = ""
             var streamErr: String? = null
+            val activeSettings = settings.value
             try {
                 container.aiBrain.generateStreamingChat(
                     userPrompt = engineeredPrompt,
                     recentHistory = emptyList(),
                     memories = mems,
-                    autoFailover = settings.value.autoFailoverProviders,
-                    identityProfile = settings.value.toIdentityProfile()
+                    autoFailover = activeSettings.autoFailoverProviders,
+                    identityProfile = activeSettings.toIdentityProfile(),
+                    dynamicRouting = activeSettings.dynamicPromptRoutingEnabled,
+                    routingStrategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy)
                 ).collect { chunk ->
                     when (chunk) {
                         is AiStreamChunk.Completed -> capturedText = chunk.output.text
@@ -2878,10 +2907,204 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             .onFailure { _statusBanner.value = it.localizedMessage ?: "Device Admin lock unavailable." }
     }
 
+    // --- Phase 11A: Dev Studio Engine (Linux inside Teena) ---
+    fun refreshDevStudioStatus() {
+        container.devStudioEngine.refreshStatusSnapshot()
+    }
+
+    fun installDevStudioEngine(customUrl: String = "", expectedSha256: String = "") {
+        viewModelScope.launch {
+            container.devStudioEngine.installRootfs(customUrl, expectedSha256)
+                .onSuccess {
+                    _statusBanner.value = "Dev Studio sandbox ready (${it.rootfsVersion})."
+                }
+                .onFailure {
+                    _statusBanner.value = it.localizedMessage ?: "Dev Studio install failed."
+                }
+        }
+    }
+
+    fun autoRepairDevStudio() {
+        viewModelScope.launch {
+            container.devStudioEngine.autoRepair()
+                .onSuccess { _statusBanner.value = "Dev Studio Auto-Repair complete." }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Auto-Repair failed." }
+        }
+    }
+
+    fun uninstallDevStudioRootfs() {
+        viewModelScope.launch {
+            container.devStudioEngine.uninstallRootfs()
+                .onSuccess { _statusBanner.value = "Dev Studio rootfs removed (workspace preserved)." }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Uninstall failed." }
+        }
+    }
+
+    fun startDevStudioBridge() {
+        viewModelScope.launch {
+            container.devStudioEngine.startBridge()
+                .onSuccess { _statusBanner.value = "Dev Studio Bridge listening on 127.0.0.1:${it.port}" }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to start bridge" }
+        }
+    }
+
+    fun stopDevStudioBridge() {
+        container.devStudioEngine.stopBridge()
+        _statusBanner.value = "Dev Studio Bridge stopped."
+    }
+
+    fun pingDevStudioBridge() {
+        viewModelScope.launch {
+            container.devStudioEngine.pingBridge()
+                .onSuccess { _statusBanner.value = "Bridge PING OK: $it" }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Bridge ping failed" }
+        }
+    }
+
+    fun createDevStudioStarterFile(fileName: String, content: String) {
+        container.devStudioEngine.createSandboxFile(fileName, content)
+            .onSuccess { _statusBanner.value = "Saved sandbox file: ${it.relativePath}" }
+            .onFailure { _statusBanner.value = it.localizedMessage ?: "Blocked file path" }
+    }
+
+    fun openDevStudioFile(relativePath: String) {
+        container.devStudioEngine.readSandboxFile(relativePath)
+            .onSuccess { _statusBanner.value = "Opened $relativePath" }
+            .onFailure { _statusBanner.value = it.localizedMessage ?: "Unable to open file" }
+    }
+
+    fun saveDevStudioFile(relativePath: String, content: String) {
+        container.devStudioEngine.saveSandboxFile(relativePath, content)
+            .onSuccess { _statusBanner.value = "Saved ${it.relativePath} (${it.sizeBytes} bytes)" }
+            .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to save file" }
+    }
+
+    fun deleteDevStudioFile(relativePath: String) {
+        container.devStudioEngine.deleteSandboxFile(relativePath)
+            .onSuccess { _statusBanner.value = "Deleted $relativePath" }
+            .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to delete file" }
+    }
+
+    fun runDevStudioTerminalCommand(command: String) {
+        val clean = command.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            container.devStudioEngine.runSandboxCommand(clean)
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Command failed"
+                }
+        }
+    }
+
+    fun clearDevStudioTerminal() {
+        container.devStudioEngine.clearTerminalHistory()
+    }
+
+    fun generateDevStudioCodeWithRouter(prompt: String, targetFileName: String) {
+        val cleanPrompt = prompt.trim()
+        if (cleanPrompt.isEmpty()) return
+        if (isEmergencyStopped.value) {
+            _devStudioAiError.value = "Emergency Stop active — resume operations first."
+            return
+        }
+        activeDevStudioAiJob?.cancel()
+        activeDevStudioAiJob = viewModelScope.launch {
+            _isDevStudioAiBusy.value = true
+            _devStudioAiError.value = null
+            _devStudioAiReply.value = ""
+
+            val activeSettings = settings.value
+            val strategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy)
+            val currentFile = container.devStudioEngine.state.value.selectedFilePath.ifBlank {
+                targetFileName.trim().ifBlank { "app.py" }
+            }
+            val currentContent = container.devStudioEngine.state.value.selectedFileContent
+            val codingPrompt = buildString {
+                appendLine("Dev Studio task for sandbox file `$currentFile`:")
+                appendLine(cleanPrompt)
+                if (currentContent.isNotBlank()) {
+                    appendLine("\nExisting file context (truncated to 2000 chars):")
+                    appendLine("```")
+                    appendLine(currentContent.take(2000))
+                    appendLine("```")
+                }
+                append("Return clean runnable code inside a single fenced code block.")
+            }
+
+            _devStudioRouterDecision.value = container.promptRouter.route(
+                prompt = codingPrompt,
+                strategy = strategy
+            )
+
+            try {
+                val mems = db.memoryFactDao().getAllMemoriesOnce()
+                container.aiBrain.generateStreamingChat(
+                    userPrompt = codingPrompt,
+                    recentHistory = emptyList(),
+                    memories = mems,
+                    autoFailover = activeSettings.autoFailoverProviders,
+                    identityProfile = activeSettings.toIdentityProfile(),
+                    dynamicRouting = activeSettings.dynamicPromptRoutingEnabled,
+                    routingStrategy = strategy
+                ).collect { chunk ->
+                    _devStudioRouterDecision.value = container.aiBrain.lastRouterDecision.value
+                        ?: _devStudioRouterDecision.value
+                    when (chunk) {
+                        is AiStreamChunk.Delta -> _devStudioAiReply.value = chunk.accumulatedText
+                        is AiStreamChunk.Completed -> {
+                            _devStudioAiReply.value = chunk.output.text
+                            _isDevStudioAiBusy.value = false
+                            _statusBanner.value = "Dev Studio AI (${chunk.output.providerUsed}) completed in ${chunk.output.latencyMs}ms"
+                        }
+                        is AiStreamChunk.Error -> {
+                            _devStudioAiError.value = SecurityAuditor.redactSecrets(chunk.message)
+                            _isDevStudioAiBusy.value = false
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                _isDevStudioAiBusy.value = false
+                throw e
+            } catch (e: Exception) {
+                _devStudioAiError.value = SecurityAuditor.redactSecrets(e.localizedMessage ?: "Dev Studio AI error")
+                _isDevStudioAiBusy.value = false
+            }
+        }
+    }
+
+    fun applyDevStudioAiCodeToFile(targetFileName: String) {
+        val raw = _devStudioAiReply.value
+        val code = com.example.system.DevStudioEngine.extractCodeBlockFromAiReply(raw)
+        if (code.isNullOrBlank()) {
+            _statusBanner.value = "No generated code to apply yet."
+            return
+        }
+        val path = container.devStudioEngine.state.value.selectedFilePath.ifBlank {
+            targetFileName.trim().ifBlank { "ai_generated.py" }
+        }
+        saveDevStudioFile(path, code)
+    }
+
+    fun killAllDevStudioProcesses() {
+        activeDevStudioAiJob?.cancel()
+        val count = container.devStudioEngine.killAllProcesses()
+        _statusBanner.value = "Stopped $count active Dev Studio process(es)."
+    }
+
+    fun cycleRoutingCostStrategy() {
+        val current = RoutingCostStrategy.fromString(settings.value.routingCostStrategy)
+        val entries = RoutingCostStrategy.entries
+        val next = entries[(entries.indexOf(current) + 1) % entries.size]
+        updateSettings { it.copy(routingCostStrategy = next.name) }
+        _statusBanner.value = "Prompt Router strategy: ${next.name.replace("_", " ")}"
+    }
+
     override fun onCleared() {
         container.speechHelper.shutdown()
         container.lyriaMusicEngine.release()
         container.voiceRoomConnector.leaveActiveRoom()
+        container.devStudioEngine.killAllProcesses()
+        container.devStudioEngine.stopBridge()
         super.onCleared()
     }
 

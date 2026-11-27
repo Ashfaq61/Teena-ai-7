@@ -65,6 +65,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.TeenaLiveKitRoomController
 import com.example.ai.VoiceRoomConnectorEngine
+import com.example.ui.components.LiveKitDiagnosticsCard
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
 import com.example.ui.theme.StatusAmber
@@ -185,6 +186,10 @@ fun VoiceRoomsScreen(
                     }
                 }
             }
+        }
+
+        item {
+            LiveKitDiagnosticsCard(mediaState = liveKitState)
         }
 
         if (showConfigEditor) {

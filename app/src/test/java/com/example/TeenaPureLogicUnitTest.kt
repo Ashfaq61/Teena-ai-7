@@ -10,6 +10,10 @@ import com.example.ai.LyriaMusicEngine
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
 import com.example.ai.ResolvedTarget
+import com.example.ai.RoutedProvider
+import com.example.ai.Router
+import com.example.ai.RoutingCostStrategy
+import com.example.ai.PromptComplexityTier
 import com.example.ai.ScreenActionKind
 import com.example.ai.ScreenAgentDecision
 import com.example.ai.ScreenVisionAgentEngine
@@ -34,6 +38,8 @@ import com.example.core.security.SecurityAuditor
 import com.example.core.security.UntrustedContentSanitizer
 import com.example.data.local.GeminiModelCacheEntity
 import com.example.data.local.NotificationRecordEntity
+import com.example.data.local.ProviderSlotEntity
+import com.example.data.local.ProviderType
 import com.example.data.local.TriggerEntity
 import com.example.data.remote.GeminiHttpException
 import com.example.system.DeviceLocationInfo
@@ -42,6 +48,8 @@ import com.example.system.TeenaSpeechHelper
 import com.example.system.TeenaTriggerLogic
 import com.example.data.remote.GeminiModelInfo
 import com.example.data.remote.ModelRegistry
+import com.example.system.DevStudioBridge
+import com.example.system.DevStudioEngine
 import com.example.system.SocialPlatform
 import com.example.system.TeenaFaceDetectionEngine
 import com.example.system.TeenaFirebaseBridge
@@ -53,8 +61,14 @@ import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.util.zip.GZIPOutputStream
 
 /**
  * Pure JVM JUnit 4 tests for JSON/model parsing, security auditing, prompt-injection isolation,
@@ -1062,12 +1076,226 @@ class TeenaPureLogicUnitTest {
 
         val defaultMedia = LiveKitMediaState()
         assertEquals("DISCONNECTED", defaultMedia.connectionState)
+        assertEquals("UNKNOWN", defaultMedia.networkQuality)
+        assertEquals(0, defaultMedia.activeParticipantCount)
+        assertEquals("IDLE", defaultMedia.lastEventName)
         assertFalse(defaultMedia.screenShareEnabled)
 
         assertEquals("", TeenaFirebaseBridge.maskToken(null))
         val maskedFcm = TeenaFirebaseBridge.maskToken("dTokenExample1234567890wxyz")
         assertTrue(maskedFcm.startsWith("dToken"))
         assertFalse(maskedFcm.contains("Example1234567890"))
+    }
+
+    @Test
+    fun phase11ADevStudioEngineHelpersAndBridgeWorkSafely() = runTest {
+        // 1. ABI compatibility prioritizes arm64-v8a and rejects unsupported ABIs
+        val arm64Abi = DevStudioEngine.evaluateAbiCompatibility(listOf("armeabi-v7a", "arm64-v8a"))
+        assertTrue(arm64Abi.isSupported)
+        assertEquals("arm64-v8a", arm64Abi.primaryAbi)
+
+        val unsupportedAbi = DevStudioEngine.evaluateAbiCompatibility(listOf("mips64"))
+        assertFalse(unsupportedAbi.isSupported)
+        assertTrue(unsupportedAbi.reason.contains("Unsupported"))
+
+        // 2. Storage check & HTTP Range resume header
+        val lowSpace = DevStudioEngine.evaluateStorageSpace(availableBytes = 40L * 1024 * 1024, requiredBytes = 150L * 1024 * 1024)
+        assertFalse(lowSpace.hasEnoughSpace)
+        val okSpace = DevStudioEngine.evaluateStorageSpace(availableBytes = 512L * 1024 * 1024, requiredBytes = 150L * 1024 * 1024)
+        assertTrue(okSpace.hasEnoughSpace)
+
+        assertNull(DevStudioEngine.buildRangeHeader(0L))
+        assertEquals("bytes=2048-", DevStudioEngine.buildRangeHeader(2048L))
+
+        // 3. Sandbox path-traversal blocker & SHA-256 verification
+        val tempRoot = Files.createTempDirectory("teena_dev_studio_unit").toFile()
+        try {
+            val workspace = File(tempRoot, "workspace").apply { mkdirs() }
+            val safeFile = DevStudioEngine.resolveSandboxPath(workspace, "sub/hello.py").getOrThrow()
+            safeFile.parentFile?.mkdirs()
+            safeFile.writeText("print('teena')\n", Charsets.UTF_8)
+
+            assertTrue(DevStudioEngine.resolveSandboxPath(workspace, "../outside.txt").isFailure)
+            assertTrue(DevStudioEngine.resolveSandboxPath(workspace, "/etc/passwd").isFailure)
+
+            val actualSha = DevStudioEngine.computeFileSha256(safeFile).getOrThrow()
+            val parsedIndex = DevStudioEngine.parseSha256ChecksumText("$actualSha  hello.py\n")
+            assertEquals(actualSha, parsedIndex)
+            assertTrue(DevStudioEngine.matchesSha256(actualSha.uppercase(), actualSha))
+            assertFalse(DevStudioEngine.matchesSha256("0".repeat(64), actualSha))
+
+            // 4. Safe .tar.gz extraction + Tar-Slip rejection
+            val validArchive = File(tempRoot, "valid.tar.gz")
+            writeSingleEntryTarGz(validArchive, "bin/hello.sh", "#!/bin/sh\necho ok\n")
+            val extractDir = File(tempRoot, "rootfs_valid")
+            val count = DevStudioEngine.extractTarGzSafely(validArchive, extractDir).getOrThrow()
+            assertEquals(1, count)
+            assertTrue(File(extractDir, "bin/hello.sh").exists())
+
+            val evilArchive = File(tempRoot, "evil.tar.gz")
+            writeSingleEntryTarGz(evilArchive, "../../escaped.txt", "pwn")
+            val evilExtractRes = DevStudioEngine.extractTarGzSafely(evilArchive, File(tempRoot, "rootfs_evil"))
+            assertTrue(evilExtractRes.isFailure)
+
+            // 5. Local 127.0.0.1 Socket IDE Bridge start/ping/stat & token check
+            val bridge = DevStudioBridge(
+                workspaceDirProvider = { workspace },
+                rootfsInstalledProvider = { true }
+            )
+            val status = bridge.start().getOrThrow()
+            assertTrue(status.isRunning)
+            assertTrue(status.port > 0)
+
+            val pingJson = JSONObject(bridge.ping().getOrThrow())
+            assertTrue(pingJson.getBoolean("ok"))
+            assertEquals("KOTLIN_SOCKET", pingJson.getString("mode"))
+
+            val statOk = JSONObject(
+                DevStudioBridge.sendCommand(status.port, bridge.currentSessionToken(), "STAT", "sub/hello.py").getOrThrow()
+            )
+            assertTrue(statOk.getBoolean("ok"))
+            assertTrue(statOk.getBoolean("exists"))
+
+            val statTraversal = JSONObject(
+                DevStudioBridge.sendCommand(status.port, bridge.currentSessionToken(), "STAT", "../etc/passwd").getOrThrow()
+            )
+            assertFalse(statTraversal.getBoolean("ok"))
+
+            val wrongToken = JSONObject(
+                DevStudioBridge.sendCommand(status.port, "bad_token", "PING").getOrThrow()
+            )
+            assertFalse(wrongToken.getBoolean("ok"))
+
+            // 6. Phase 11 Bridge WRITE_FILE / READ_FILE + command tokenization + AI code extraction
+            val writeOk = JSONObject(
+                bridge.writeFileViaBridge("src/calc.py", "print(2 + 2)\n").getOrThrow()
+            )
+            assertTrue(writeOk.getBoolean("ok"))
+            val readOk = JSONObject(bridge.readFileViaBridge("src/calc.py").getOrThrow())
+            assertTrue(readOk.getBoolean("ok"))
+            assertTrue(readOk.getString("content").contains("print(2 + 2)"))
+
+            val readBlocked = JSONObject(bridge.readFileViaBridge("../secret.txt").getOrThrow())
+            assertFalse(readBlocked.getBoolean("ok"))
+
+            assertEquals(
+                listOf("echo", "hello world", "teena"),
+                DevStudioEngine.tokenizeCommandArgs("""echo "hello world" 'teena'""")
+            )
+            val extractedCode = DevStudioEngine.extractCodeBlockFromAiReply(
+                "Here is your script:\n```python\ndef greet():\n    return 'Assalam o Alaikum'\n```\nDone."
+            )
+            assertTrue(extractedCode?.contains("def greet():") == true)
+
+            bridge.stop()
+            assertFalse(bridge.status().isRunning)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun dynamicRouterEvaluatesComplexityCostAndSelectsOptimalProvider() {
+        val router = Router()
+
+        // 1. Short simple query -> SIMPLE tier, BALANCED picks fast Groq over OpenRouter/Gemini
+        val simpleDecision = router.route(
+            prompt = "Hi Teena, what time is it?",
+            strategy = RoutingCostStrategy.BALANCED
+        )
+        assertEquals(PromptComplexityTier.SIMPLE, simpleDecision.evaluation.complexityTier)
+        assertEquals(RoutedProvider.GROQ, simpleDecision.selectedProvider)
+        assertTrue(simpleDecision.reason.contains("Groq"))
+
+        // 2. COST_FIRST picks OpenRouter free tier ($0.00)
+        val costFirstDecision = router.route(
+            prompt = "Summarize Kotlin data classes concisely",
+            strategy = RoutingCostStrategy.COST_FIRST,
+            slotModels = mapOf(
+                RoutedProvider.GEMINI to "gemini-2.5-flash",
+                RoutedProvider.GROQ to "llama-3.3-70b-versatile",
+                RoutedProvider.OPENROUTER to "meta-llama/llama-3.3-70b-instruct:free"
+            )
+        )
+        assertEquals(RoutedProvider.OPENROUTER, costFirstDecision.selectedProvider)
+        assertTrue(costFirstDecision.costProfiles.getValue(RoutedProvider.OPENROUTER).isFreeTier)
+        assertEquals(0.0, costFirstDecision.costProfiles.getValue(RoutedProvider.OPENROUTER).estimatedCostUsd, 0.000001)
+
+        // 3. Complex multi-step code + architecture reasoning prompt -> HIGH tier, picks Gemini
+        val complexPrompt = """
+            Analyze and compare the algorithm complexity and tradeoff of using Kotlin coroutine Flow
+            versus RxJava in an Android clean architecture app, then refactor the repository class
+            ```kotlin
+            class SyncRepo { fun sync() {} }
+            ```
+            and explain step by step how to optimize exception handling and database schema migrations.
+        """.trimIndent()
+        val complexDecision = router.route(
+            prompt = complexPrompt,
+            historyTurns = 6,
+            strategy = RoutingCostStrategy.BALANCED
+        )
+        assertEquals(PromptComplexityTier.HIGH, complexDecision.evaluation.complexityTier)
+        assertTrue(complexDecision.evaluation.isCodeHeavy)
+        assertTrue(complexDecision.evaluation.isReasoningHeavy)
+        assertEquals(RoutedProvider.GEMINI, complexDecision.selectedProvider)
+
+        // 4. Image attachment strictly routes to Gemini even under COST_FIRST
+        val visionDecision = router.route(
+            prompt = "What is in this photo?",
+            hasImageAttachment = true,
+            strategy = RoutingCostStrategy.COST_FIRST
+        )
+        assertTrue(visionDecision.evaluation.requiresVision)
+        assertEquals(PromptComplexityTier.HIGH, visionDecision.evaluation.complexityTier)
+        assertEquals(RoutedProvider.GEMINI, visionDecision.selectedProvider)
+
+        // 5. Slot ordering ranks configured cloud providers by score while keeping Custom/Offline as fallback tail
+        val slots = listOf(
+            ProviderSlotEntity("slot_offline", ProviderType.OFFLINE_LOCAL.name, "Offline", selectedModel = "teena-local-tfidf-v1", isPrimary = false),
+            ProviderSlotEntity("slot_or", ProviderType.OPENROUTER.name, "OpenRouter", selectedModel = "meta-llama/llama-3.3-70b-instruct:free", isPrimary = false),
+            ProviderSlotEntity("slot_custom", ProviderType.CUSTOM_OPENAI.name, "Custom", selectedModel = "local-model", isPrimary = false),
+            ProviderSlotEntity("slot_groq", ProviderType.GROQ.name, "Groq", selectedModel = "llama-3.3-70b-versatile", isPrimary = false),
+            ProviderSlotEntity("slot_gem", ProviderType.GEMINI_DIRECT.name, "Gemini", selectedModel = "gemini-2.5-flash", isPrimary = true)
+        )
+        val (orderedSlots, slotDecision) = router.orderSlotsForPrompt(
+            prompt = "Hello!",
+            enabledSlots = slots,
+            configuredCloudTypes = setOf(ProviderType.GEMINI_DIRECT, ProviderType.GROQ, ProviderType.OPENROUTER),
+            strategy = RoutingCostStrategy.BALANCED
+        )
+        assertEquals(RoutedProvider.GROQ, slotDecision.selectedProvider)
+        assertEquals("slot_groq", orderedSlots.first().slotId)
+        assertEquals("slot_custom", orderedSlots[orderedSlots.size - 2].slotId)
+        assertEquals("slot_offline", orderedSlots.last().slotId)
+    }
+
+    private fun writeSingleEntryTarGz(dest: File, entryName: String, content: String) {
+        val data = content.toByteArray(Charsets.UTF_8)
+        val tarBytes = ByteArrayOutputStream().apply {
+            val header = ByteArray(512)
+            val nameBytes = entryName.toByteArray(Charsets.UTF_8)
+            System.arraycopy(nameBytes, 0, header, 0, minOf(nameBytes.size, 100))
+            val modeBytes = "0000755\u0000".toByteArray(Charsets.US_ASCII)
+            System.arraycopy(modeBytes, 0, header, 100, modeBytes.size)
+            val sizeStr = "%011o\u0000".format(data.size)
+            System.arraycopy(sizeStr.toByteArray(Charsets.US_ASCII), 0, header, 124, 12)
+            header[156] = '0'.code.toByte()
+            // Compute unsigned header checksum (spaces in checksum field 148..155)
+            for (i in 148 until 156) header[i] = ' '.code.toByte()
+            val cksum = header.sumOf { it.toInt() and 0xFF }
+            val cksumStr = "%06o\u0000 ".format(cksum)
+            System.arraycopy(cksumStr.toByteArray(Charsets.US_ASCII), 0, header, 148, 8)
+            write(header)
+            write(data)
+            val pad = (512 - (data.size % 512)) % 512
+            if (pad > 0) write(ByteArray(pad))
+            write(ByteArray(1024))
+        }.toByteArray()
+
+        GZIPOutputStream(FileOutputStream(dest)).use { gz ->
+            gz.write(tarBytes)
+        }
     }
 }
 

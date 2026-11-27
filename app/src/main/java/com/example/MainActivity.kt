@@ -75,6 +75,7 @@ import com.example.ui.screens.AutomationAndDeviceScreen
 import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.ConfirmActionDialog
 import com.example.ui.screens.DashboardScreen
+import com.example.ui.screens.DevStudioScreen
 import com.example.ui.screens.HubDirectoryScreen
 import com.example.ui.screens.IdentityAndPersonaScreen
 import com.example.ui.screens.MapsScreen
@@ -190,6 +191,7 @@ fun TeenaRootScaffold(
         "research" -> "Research Center"
         "api_manager" -> "API Manager"
         "memory" -> "Memory & History"
+        "dev_studio" -> "Teena Dev Studio"
         "build_center" -> "APK Build Center"
         "notifications" -> "Notifications & Tasks"
         "triggers" -> "Triggers & Keyboard"
@@ -420,6 +422,7 @@ fun TeenaRootScaffold(
                         composable("research") { ResearchCenterScreen(viewModel) }
                         composable("api_manager") { ApiManagerScreen(viewModel) }
                         composable("memory") { MemoryAndHistoryScreen(viewModel) }
+                        composable("dev_studio") { DevStudioScreen(viewModel) }
                         composable("build_center") { ApkBuildCenterScreen(viewModel) }
                         composable("notifications") {
                             NotificationsAndRemindersScreen(viewModel, onOpenTriggers = { navigateTo("triggers") })
