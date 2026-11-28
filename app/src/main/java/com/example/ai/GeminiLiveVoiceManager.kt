@@ -459,6 +459,41 @@ class GeminiLiveVoiceManager(
                 )
                 put(
                     JSONObject().apply {
+                        put("name", "build_apk")
+                        put("description", "Open Teena Dev Studio and start building an Android APK when user says 'apk banao' or 'build apk'")
+                        put(
+                            "parameters",
+                            JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject())
+                            }
+                        )
+                    }
+                )
+                put(
+                    JSONObject().apply {
+                        put("name", "open_shorts_creator")
+                        put("description", "Open Teena Phase 13 Shorts Creator (9:16 vertical reel studio) and optionally generate a script for the given topic when user says 'shorts banao' or 'reel banao'")
+                        put(
+                            "parameters",
+                            JSONObject().apply {
+                                put("type", "OBJECT")
+                                put(
+                                    "properties",
+                                    JSONObject().put(
+                                        "topic",
+                                        JSONObject().apply {
+                                            put("type", "STRING")
+                                            put("description", "Optional Shorts topic or idea")
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+                )
+                put(
+                    JSONObject().apply {
                         put("name", "read_screen")
                         put("description", "Read current screen UI hierarchy (package, visible texts, clickable buttons) via TeenaAccessibilityService")
                         put(

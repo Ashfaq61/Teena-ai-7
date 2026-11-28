@@ -47,11 +47,13 @@ class AiBrainEngine(
     private val network: TeenaNetworkClients,
     private val offlineEngine: OfflineCapabilitiesEngine,
     private val emergencyStopController: EmergencyStopController? = null,
-    private val router: Router = Router()
+    private val router: Router = Router(),
+    private val geminiRepository: GeminiRepository = GeminiRepository(db, vault, network, offlineEngine, emergencyStopController)
 ) {
     companion object {
         private const val TAG = "AiBrainEngine"
-        const val SLOT_GEMINI_PRIMARY = "slot_gemini_primary"
+        const val SLOT_GEMINI_PRIMARY = GeminiRepository.SLOT_GEMINI_PRIMARY
+        const val DEFAULT_GEMINI_TEXT_MODEL = GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL
         private const val LEGACY_FIREBASE_SLOT = "slot_gemini_ai_logic"
 
         private val websiteIntentRegex = Regex(
@@ -148,41 +150,18 @@ class AiBrainEngine(
 
     /**
      * Resolves the active API key strictly from the PRIMARY Gemini slot in API Manager
-     * (falling back to any enabled Gemini slot with a stored key only if a non-Gemini provider is primary).
+     * via the shared [GeminiRepository].
      */
-    suspend fun resolvePrimaryGeminiSlotAndKey(): Pair<ProviderSlotEntity?, String?> {
-        val slots = db.providerSlotDao().getSlotsOnce()
-        val geminiSlots = slots.filter { it.providerType == ProviderType.GEMINI_DIRECT.name && it.isEnabled }
-        if (geminiSlots.isEmpty()) return null to null
-
-        val explicitPrimaryGemini = geminiSlots.firstOrNull { it.isPrimary }
-        if (explicitPrimaryGemini != null) {
-            val key = vault.readSecret(explicitPrimaryGemini.slotId)?.trim()?.takeIf { it.isNotEmpty() }
-            return explicitPrimaryGemini to key
-        }
-
-        val firstWithKey = geminiSlots.firstOrNull { !vault.readSecret(it.slotId).isNullOrBlank() }
-        val targetSlot = firstWithKey ?: geminiSlots.first()
-        val key = vault.readSecret(targetSlot.slotId)?.trim()?.takeIf { it.isNotEmpty() }
-        return targetSlot to key
-    }
+    suspend fun resolvePrimaryGeminiSlotAndKey(): Pair<ProviderSlotEntity?, String?> =
+        geminiRepository.resolvePrimarySlotAndKey()
 
     /**
-     * Returns all enabled Gemini key slots ordered with primary first, for automatic quota/key rotation.
+     * Returns all enabled Gemini key slots ordered with primary first via [GeminiRepository].
      */
-    suspend fun resolveAllGeminiKeysInOrder(): List<Pair<ProviderSlotEntity, String>> {
-        val slots = db.providerSlotDao().getSlotsOnce()
-            .filter { it.providerType == ProviderType.GEMINI_DIRECT.name && it.isEnabled }
-            .sortedByDescending { it.isPrimary }
-        return slots.mapNotNull { slot ->
-            val key = vault.readSecret(slot.slotId)?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            slot to key
-        }
-    }
+    suspend fun resolveAllGeminiKeysInOrder(): List<Pair<ProviderSlotEntity, String>> =
+        geminiRepository.resolveAllKeysInOrder()
 
-    suspend fun hasPrimaryGeminiApiKey(): Boolean {
-        return resolveAllGeminiKeysInOrder().isNotEmpty() || !resolvePrimaryGeminiSlotAndKey().second.isNullOrBlank()
-    }
+    suspend fun hasPrimaryGeminiApiKey(): Boolean = geminiRepository.hasApiKey()
 
     suspend fun resetGeminiBlacklist(slotId: String) {
         val key = vault.readSecret(slotId)?.trim()?.takeIf { it.isNotEmpty() } ?: return
@@ -197,7 +176,8 @@ class AiBrainEngine(
         autoFailover: Boolean = true,
         identityProfile: TeenaIdentityProfile = TeenaIdentityProfile(),
         dynamicRouting: Boolean = true,
-        routingStrategy: RoutingCostStrategy = RoutingCostStrategy.BALANCED
+        routingStrategy: RoutingCostStrategy = RoutingCostStrategy.BALANCED,
+        preferredGeminiModel: String? = null
     ): Flow<AiStreamChunk> = channelFlow {
         val lang = offlineEngine.detectLanguage(userPrompt)
         val isWebsiteRequest = detectWebsiteBanaoIntent(userPrompt)
@@ -269,7 +249,8 @@ class AiBrainEngine(
                             try {
                                 val result = executeGeminiWithModelFailover(
                                     apiKey = apiKey,
-                                    slot = geminiSlot
+                                    slot = geminiSlot,
+                                    preferredModelOverride = preferredGeminiModel
                                 ) { modelId ->
                                     withTimeout(60_000L) {
                                         if (attachedImage != null) {
@@ -791,10 +772,11 @@ class AiBrainEngine(
     private suspend fun executeGeminiWithModelFailover(
         apiKey: String,
         slot: ProviderSlotEntity,
+        preferredModelOverride: String? = null,
         block: suspend (modelId: String) -> OpenAiChatResult
     ): OpenAiChatResult {
         var ranked = network.modelRegistry.getRankedChatCandidates(apiKey, forceRefresh = false).getOrThrow()
-        var candidates = buildCandidateQueue(slot, ranked)
+        var candidates = buildCandidateQueue(slot, ranked, preferredModelOverride)
         val tried = mutableSetOf<String>()
         var refreshedFromNetwork = false
         var lastError: Throwable? = null
@@ -841,8 +823,16 @@ class AiBrainEngine(
 
     private fun buildCandidateQueue(
         slot: ProviderSlotEntity,
-        rankedChat: List<GeminiModelInfo>
+        rankedChat: List<GeminiModelInfo>,
+        preferredModelOverride: String? = null
     ): List<GeminiModelInfo> {
+        val overrideId = preferredModelOverride?.removePrefix("models/")?.trim().orEmpty()
+        if (overrideId.isNotEmpty()) {
+            val overrideMatch = rankedChat.firstOrNull { it.shortId == overrideId }
+            if (overrideMatch != null) {
+                return listOf(overrideMatch) + rankedChat.filter { it.shortId != overrideId }
+            }
+        }
         val currentId = slot.selectedModel.removePrefix("models/").trim()
         if (currentId.isNotEmpty() && slot.lastTestStatus == "ACTIVE") {
             val match = rankedChat.firstOrNull { it.shortId == currentId }

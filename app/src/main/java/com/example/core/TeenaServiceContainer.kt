@@ -2,6 +2,7 @@ package com.example.core
 
 import android.content.Context
 import com.example.ai.AiBrainEngine
+import com.example.ai.ErrorDoctorEngine
 import com.example.ai.ExternalAgentHub
 import com.example.ai.LiveSocialTaskDriver
 import com.example.ai.LyriaMusicEngine
@@ -20,9 +21,11 @@ import com.example.core.security.KeystoreSecretVault
 import com.example.core.security.OriginalCodeVaultManager
 import com.example.data.local.TeenaDatabase
 import com.example.data.local.TeenaPreferences
+import com.example.data.remote.GitHubActionsBuildClient
 import com.example.data.remote.TeenaNetworkClients
 import com.example.system.ApkBuildEngine
 import com.example.system.CameraMediaEngine
+import com.example.system.DevApkBuildManager
 import com.example.system.DevStudioEngine
 import com.example.system.DocumentKnowledgeEngine
 import com.example.system.MapsLocationEngine
@@ -75,11 +78,37 @@ class TeenaServiceContainer(context: Context) {
     val devStudioEngine: DevStudioEngine by lazy {
         DevStudioEngine(appContext, networkClients.httpClient, emergencyStopController)
     }
+    val gitHubActionsBuildClient: GitHubActionsBuildClient by lazy {
+        GitHubActionsBuildClient(networkClients.httpClient, emergencyStopController)
+    }
+    val devApkBuildManager: DevApkBuildManager by lazy {
+        DevApkBuildManager(appContext, vault)
+    }
 
     val promptRouter: Router by lazy { Router() }
 
+    val geminiRepository: com.example.ai.GeminiRepository by lazy {
+        com.example.ai.GeminiRepository(database, vault, networkClients, offlineEngine, emergencyStopController)
+    }
+
+    val errorDoctorEngine: ErrorDoctorEngine by lazy {
+        ErrorDoctorEngine(geminiRepository)
+    }
+
+    val shortsProjectStore: com.example.system.ShortsProjectStore by lazy {
+        com.example.system.ShortsProjectStore(appContext)
+    }
+
+    val shortsScriptEngine: com.example.ai.ShortsScriptEngine by lazy {
+        com.example.ai.ShortsScriptEngine(geminiRepository)
+    }
+
+    val shortsVideoExporter: com.example.system.ShortsVideoExporter by lazy {
+        com.example.system.ShortsVideoExporter(appContext, shortsProjectStore)
+    }
+
     val aiBrain: AiBrainEngine by lazy {
-        AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController, promptRouter)
+        AiBrainEngine(database, vault, networkClients, offlineEngine, emergencyStopController, promptRouter, geminiRepository)
     }
 
     val externalAgentHub: ExternalAgentHub by lazy {

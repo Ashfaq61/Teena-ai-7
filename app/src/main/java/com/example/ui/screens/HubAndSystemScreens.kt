@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MeetingRoom
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
@@ -53,8 +54,10 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -68,15 +71,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
+import com.example.ai.GeminiRepository
 import com.example.ai.TeenaIdentityEngine
 import com.example.data.local.toIdentityProfile
 import com.example.system.TeenaAccessibilityService
 import com.example.system.TeenaNotificationListenerService
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.NeuralMint
+import com.example.ui.theme.StatusCrimson
 import com.example.ui.viewmodel.TeenaViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -105,6 +111,7 @@ fun HubDirectoryScreen(onNavigate: (String) -> Unit) {
         HubTile("identity", "Identity & Persona", "Teena personalities & your user profile", Icons.Default.AutoAwesome),
         HubTile("voice_rooms", "Voice Rooms", "LiveKit token connector & audio rooms", Icons.Default.MeetingRoom),
         HubTile("music_studio", "Music Studio", "Lyria 3 clips (30s) & full tracks", Icons.Default.MusicNote),
+        HubTile("shorts_creator", "Shorts Creator", "Phase 13 • 9:16 AI reels, voiceover & MP4 export", Icons.Default.Movie),
         HubTile("website_forge", "Website Forge", "Live HTML5 & WebGL 3D site preview", Icons.Default.Web),
         HubTile("maps", "Interactive Maps", "map.html WebView & optional GPS", Icons.Default.Map),
         HubTile("sketch", "Sketch Pad", "Draw, save & share via SketchFileProvider", Icons.Default.Draw),
@@ -617,6 +624,206 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.size(6.dp))
                     Text(if (emergencyStopped) "Resume Operations" else "EMERGENCY STOP (Halt All Automation & Calls)")
+                }
+            }
+        }
+
+        item {
+            var geminiModelDraft by remember(settings.geminiTextModel) {
+                mutableStateOf(GeminiRepository.normalizeModelId(settings.geminiTextModel))
+            }
+            val isTestingGemini by viewModel.isTestingGemini.collectAsStateWithLifecycle()
+            val geminiTestResult by viewModel.geminiTestResult.collectAsStateWithLifecycle()
+            val geminiTestSucceeded by viewModel.geminiTestSucceeded.collectAsStateWithLifecycle()
+
+            NeuralCard {
+                SectionHeader(
+                    title = "Gemini Text Model & Live Test",
+                    subtitle = "Default: ${GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL} (shared across Chat & Dev Studio)",
+                    trailing = {
+                        StatusPill(
+                            when (geminiTestSucceeded) {
+                                true -> "ACTIVE"
+                                false -> "FAILED"
+                                null -> if (isTestingGemini) "TESTING" else "READY"
+                            },
+                            modifier = Modifier.testTag("settings_gemini_status_pill")
+                        )
+                    }
+                )
+                OutlinedTextField(
+                    value = geminiModelDraft,
+                    onValueChange = { geminiModelDraft = it },
+                    label = { Text("Gemini Text Model Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_gemini_model_input")
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GeminiRepository.RECOMMENDED_TEXT_MODELS.forEach { presetModel ->
+                        FilterChip(
+                            selected = geminiModelDraft.trim() == presetModel,
+                            onClick = { geminiModelDraft = presetModel },
+                            label = { Text(presetModel, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = { viewModel.saveGeminiTextModel(geminiModelDraft) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("settings_save_gemini_model_btn")
+                    ) {
+                        Text("Save Model", maxLines = 1)
+                    }
+                    Button(
+                        onClick = { viewModel.testGeminiConnection(geminiModelDraft) },
+                        enabled = !isTestingGemini && !emergencyStopped,
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("settings_test_gemini_btn")
+                    ) {
+                        Text(if (isTestingGemini) "Testing..." else "Test Gemini", maxLines = 1)
+                    }
+                }
+                if (!geminiTestResult.isNullOrBlank()) {
+                    val resultColor = when (geminiTestSucceeded) {
+                        true -> NeuralMint
+                        false -> StatusCrimson
+                        null -> MaterialTheme.colorScheme.onSurface
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = resultColor.copy(alpha = 0.12f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = geminiTestResult.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = resultColor,
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .testTag("settings_test_gemini_result")
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            val apkBuildState by viewModel.devApkBuildState.collectAsStateWithLifecycle()
+            var ghOwnerDraft by remember(settings.githubOwner) { mutableStateOf(settings.githubOwner) }
+            var ghRepoDraft by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
+            var ghPrivateDraft by remember(settings.githubPrivateRepo) { mutableStateOf(settings.githubPrivateRepo) }
+            var ghTokenDraft by remember { mutableStateOf("") }
+
+            NeuralCard {
+                SectionHeader(
+                    title = "GitHub Actions (Dev Studio APK Build)",
+                    subtitle = "Free Cloud Build default • Encrypted in Android Keystore",
+                    trailing = {
+                        StatusPill(
+                            when (apkBuildState.githubTokenTestSucceeded) {
+                                true -> "VERIFIED"
+                                false -> "FAILED"
+                                null -> if (apkBuildState.hasGithubTokenSaved) "READY" else "NOT_SET"
+                            },
+                            modifier = Modifier.testTag("settings_github_status_pill")
+                        )
+                    }
+                )
+                OutlinedTextField(
+                    value = ghOwnerDraft,
+                    onValueChange = { ghOwnerDraft = it },
+                    label = { Text("GitHub Username / Owner") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_github_owner_input")
+                )
+                OutlinedTextField(
+                    value = ghRepoDraft,
+                    onValueChange = { ghRepoDraft = it },
+                    label = { Text("Repository Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_github_repo_input")
+                )
+                OutlinedTextField(
+                    value = ghTokenDraft,
+                    onValueChange = { ghTokenDraft = it },
+                    label = {
+                        Text(
+                            if (apkBuildState.hasGithubTokenSaved) "Fine-grained Token (saved: ${apkBuildState.maskedGithubToken})"
+                            else "Fine-grained PAT (Contents, Actions, Workflows)"
+                        )
+                    },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_github_token_input")
+                )
+                SettingToggleRow(
+                    title = "Private GitHub Repository",
+                    desc = "Public = unlimited free build minutes; Private = 2,000 free min/month.",
+                    checked = ghPrivateDraft
+                ) { ghPrivateDraft = it }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = {
+                            viewModel.saveDevGitHubConfig(ghOwnerDraft, ghRepoDraft, ghPrivateDraft, ghTokenDraft)
+                            ghTokenDraft = ""
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("settings_save_github_btn")
+                    ) {
+                        Text("Save GitHub", maxLines = 1)
+                    }
+                    Button(
+                        onClick = { viewModel.testDevGitHubToken(ghTokenDraft) },
+                        enabled = !apkBuildState.isTestingGithubToken && !emergencyStopped,
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("settings_test_github_token_btn")
+                    ) {
+                        Text(if (apkBuildState.isTestingGithubToken) "Testing..." else "Test token", maxLines = 1)
+                    }
+                }
+                if (!apkBuildState.githubTokenTestResult.isNullOrBlank()) {
+                    val tone = when (apkBuildState.githubTokenTestSucceeded) {
+                        true -> NeuralMint
+                        false -> StatusCrimson
+                        null -> NeuralCyan
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = tone.copy(alpha = 0.12f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = apkBuildState.githubTokenTestResult.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tone,
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .testTag("settings_test_github_token_result")
+                        )
+                    }
                 }
             }
         }

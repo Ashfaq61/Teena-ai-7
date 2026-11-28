@@ -29,9 +29,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CodeVaultEntryEntity::class,
         CapabilitySummaryEntity::class,
         ScreenAutomationLogEntity::class,
-        TriggerEntity::class
+        TriggerEntity::class,
+        ErrorDoctorFixEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class TeenaDatabase : RoomDatabase() {
@@ -50,6 +51,7 @@ abstract class TeenaDatabase : RoomDatabase() {
     abstract fun capabilitySummaryDao(): CapabilitySummaryDao
     abstract fun screenAutomationLogDao(): ScreenAutomationLogDao
     abstract fun triggerDao(): TriggerDao
+    abstract fun errorDoctorFixDao(): ErrorDoctorFixDao
 
     companion object {
         @Volatile
@@ -249,6 +251,35 @@ abstract class TeenaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `buildMode` TEXT NOT NULL DEFAULT 'CLOUD_GITHUB'")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `buildType` TEXT NOT NULL DEFAULT 'DEBUG'")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `apkLocalPath` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `apkFileName` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `elapsedMs` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `workflowRunId` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `build_records` ADD COLUMN `errorSummary` TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `error_doctor_fixes` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `errorSignature` TEXT NOT NULL,
+                        `filePath` TEXT NOT NULL,
+                        `lineNumber` INTEGER NOT NULL,
+                        `hinglishCause` TEXT NOT NULL,
+                        `fixStrategy` TEXT NOT NULL,
+                        `patchSummary` TEXT NOT NULL,
+                        `patchReplacement` TEXT NOT NULL,
+                        `appliedCount` INTEGER NOT NULL,
+                        `lastSuccess` INTEGER NOT NULL,
+                        `timestamp` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): TeenaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -262,7 +293,8 @@ abstract class TeenaDatabase : RoomDatabase() {
                         MIGRATION_3_4,
                         MIGRATION_4_5,
                         MIGRATION_5_6,
-                        MIGRATION_6_7
+                        MIGRATION_6_7,
+                        MIGRATION_7_8
                     )
                     .build()
                     .also { INSTANCE = it }

@@ -271,6 +271,28 @@ data class BuildRecordEntity(
     val apkSizeBytes: Long,
     val logs: String,
     val downloadUrl: String = "",
+    val buildMode: String = "CLOUD_GITHUB",
+    val buildType: String = "DEBUG",
+    val apkLocalPath: String = "",
+    val apkFileName: String = "",
+    val elapsedMs: Long = 0L,
+    val workflowRunId: Long = 0L,
+    val errorSummary: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "error_doctor_fixes")
+data class ErrorDoctorFixEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val errorSignature: String,
+    val filePath: String,
+    val lineNumber: Int = 0,
+    val hinglishCause: String,
+    val fixStrategy: String, // KNOWN_PATTERN or GEMINI_PATCH
+    val patchSummary: String,
+    val patchReplacement: String = "",
+    val appliedCount: Int = 1,
+    val lastSuccess: Boolean = true,
     val timestamp: Long = System.currentTimeMillis()
 )
 

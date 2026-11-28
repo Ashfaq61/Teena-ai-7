@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.RoutingCostStrategy
+import com.example.system.DevBuildMode
 import com.example.system.DevStudioEngine
 import com.example.system.DevStudioPhase
 import com.example.ui.theme.NeuralCyan
@@ -69,6 +70,10 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
     val aiReply by viewModel.devStudioAiReply.collectAsStateWithLifecycle()
     val aiError by viewModel.devStudioAiError.collectAsStateWithLifecycle()
     val isAiBusy by viewModel.isDevStudioAiBusy.collectAsStateWithLifecycle()
+    val lastAiPrompt by viewModel.devStudioLastPrompt.collectAsStateWithLifecycle()
+    val apkBuildState by viewModel.devApkBuildState.collectAsStateWithLifecycle()
+    val buildRecords by viewModel.buildRecords.collectAsStateWithLifecycle()
+    val doctorFixes by viewModel.errorDoctorFixes.collectAsStateWithLifecycle()
 
     var showCustomMirror by remember { mutableStateOf(false) }
     var customUrl by remember { mutableStateOf("") }
@@ -80,6 +85,7 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
 
     LaunchedEffect(Unit) {
         viewModel.refreshDevStudioStatus()
+        viewModel.refreshDevApkStatus()
     }
 
     val isWorking = state.phase in setOf(
@@ -97,6 +103,40 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
+            DevStudioApkToolbarCard(
+                buildState = apkBuildState,
+                settings = settings,
+                emergencyStopped = emergencyStopped,
+                onBuildApk = { viewModel.startDevApkBuild() },
+                onCancelBuild = { viewModel.cancelDevApkBuild() },
+                onSelectMode = { viewModel.selectDevBuildMode(it) },
+                onSelectBuildType = { viewModel.selectDevBuildType(it) },
+                onSaveGitHubConfig = { owner, repo, priv, token ->
+                    viewModel.saveDevGitHubConfig(owner, repo, priv, token)
+                },
+                onTestGitHubToken = { draft -> viewModel.testDevGitHubToken(draft) }
+            )
+        }
+
+        if (apkBuildState.phase != com.example.ui.viewmodel.DevApkBuildPhase.IDLE ||
+            apkBuildState.localPreflight != null
+        ) {
+            item {
+                DevStudioBuildLiveAndOutcomeSection(
+                    buildState = apkBuildState,
+                    doctorFixes = doctorFixes,
+                    onCancelBuild = { viewModel.cancelDevApkBuild() },
+                    onInstallApk = { viewModel.installBuiltDevApk() },
+                    onShareApk = { viewModel.shareBuiltDevApk() },
+                    onOpenUnknownAppsSettings = { viewModel.openUnknownAppsInstallSettings() },
+                    onAskGeminiDoctor = { viewModel.askGeminiForErrorDoctorFix() },
+                    onApplyDoctorPatchAndRebuild = { viewModel.applyErrorDoctorPatchAndRebuild() },
+                    onSwitchToCloudBuild = { viewModel.selectDevBuildMode(DevBuildMode.CLOUD_GITHUB) }
+                )
+            }
+        }
+
         item {
             NeuralCard(
                 borderColor = when (state.phase) {
@@ -368,7 +408,20 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
             NeuralCard(modifier = Modifier.testTag("dev_studio_workspace_card")) {
                 SectionHeader(
                     title = "Workspace Sandbox & Editor (${state.workspaceFiles.size})",
-                    subtitle = state.workspacePath
+                    subtitle = state.workspacePath,
+                    trailing = {
+                        FilledTonalButton(
+                            onClick = { viewModel.startDevApkBuild() },
+                            enabled = !apkBuildState.isActive && !emergencyStopped,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("dev_studio_project_build_apk_btn")
+                        ) {
+                            Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.size(4.dp))
+                            Text("Build APK", maxLines = 1)
+                        }
+                    }
                 )
 
                 Row(
@@ -494,15 +547,18 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
             DevStudioAiCopilotCard(
                 selectedFilePath = state.selectedFilePath,
                 targetFileFallback = newFileName,
+                activeGeminiModel = com.example.ai.GeminiRepository.normalizeModelId(settings.geminiTextModel),
                 routingStrategy = RoutingCostStrategy.fromString(settings.routingCostStrategy),
                 dynamicRoutingEnabled = settings.dynamicPromptRoutingEnabled,
                 routerDecision = routerDecision,
                 aiReply = aiReply,
                 aiError = aiError,
                 isBusy = isAiBusy,
+                hasLastPrompt = lastAiPrompt.isNotBlank(),
                 emergencyStopped = emergencyStopped,
                 onCycleStrategy = { viewModel.cycleRoutingCostStrategy() },
                 onGenerateCode = { prompt, target -> viewModel.generateDevStudioCodeWithRouter(prompt, target) },
+                onRetry = { viewModel.retryDevStudioAi() },
                 onApplyCodeToFile = { target -> viewModel.applyDevStudioAiCodeToFile(target) }
             )
         }
@@ -513,6 +569,19 @@ fun DevStudioScreen(viewModel: TeenaViewModel) {
                 history = state.terminalHistory,
                 onRunCommand = { cmd -> viewModel.runDevStudioTerminalCommand(cmd) },
                 onClearHistory = { viewModel.clearDevStudioTerminal() }
+            )
+        }
+
+        item {
+            DevStudioKeystoreAndBuildHistorySection(
+                buildState = apkBuildState,
+                settings = settings,
+                builds = buildRecords,
+                onToggleAutoBump = { viewModel.setDevAutoBumpVersion(it) },
+                onGenerateKeystore = { viewModel.generateOrVerifyDevKeystore() },
+                onExportKeystoreUri = { uri -> viewModel.exportDevKeystoreToUri(uri) },
+                onReinstallRecord = { rec -> viewModel.reinstallFromBuildRecord(rec) },
+                onDeleteRecord = { rec -> viewModel.deleteBuildRecord(rec) }
             )
         }
 

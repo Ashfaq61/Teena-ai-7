@@ -298,6 +298,7 @@ fun ApkBuildCenterScreen(viewModel: TeenaViewModel) {
     val runs by viewModel.workflowRuns.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+    val apkBuildState by viewModel.devApkBuildState.collectAsStateWithLifecycle()
 
     var owner by remember(settings.githubOwner) { mutableStateOf(settings.githubOwner) }
     var repo by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
@@ -334,11 +335,11 @@ fun ApkBuildCenterScreen(viewModel: TeenaViewModel) {
                 SectionHeader("GitHub Actions Autonomous Build Pipeline")
                 OutlinedTextField(value = owner, onValueChange = { owner = it }, label = { Text("GitHub Owner / Org") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = repo, onValueChange = { repo = it }, label = { Text("Repository Name") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = workflow, onValueChange = { workflow = it }, label = { Text("Workflow File (e.g. android-build.yml)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = workflow, onValueChange = { workflow = it }, label = { Text("Workflow File (e.g. build.yml)") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     value = ghToken,
                     onValueChange = { ghToken = it },
-                    label = { Text("GitHub PAT (Actions scope, encrypted in Keystore)") },
+                    label = { Text("GitHub PAT (saved: ${apkBuildState.maskedGithubToken}, encrypted in Keystore)") },
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -346,13 +347,24 @@ fun ApkBuildCenterScreen(viewModel: TeenaViewModel) {
                     FilledTonalButton(onClick = {
                         viewModel.saveGitHubCiConfig(owner, repo, workflow, ghToken)
                         ghToken = ""
-                    }) { Text("Save Config") }
+                    }) { Text("Save") }
+                    OutlinedButton(
+                        onClick = { viewModel.testDevGitHubToken(ghToken) },
+                        enabled = !apkBuildState.isTestingGithubToken
+                    ) { Text(if (apkBuildState.isTestingGithubToken) "Testing..." else "Test Token") }
                     OutlinedButton(onClick = { viewModel.fetchGitHubCiRuns() }, enabled = !isBusy) {
                         Text("Check Runs")
                     }
-                    Button(onClick = { viewModel.triggerGitHubCiBuild() }, enabled = !isBusy) {
-                        Text("Trigger CI Build")
-                    }
+                }
+                Button(onClick = { viewModel.triggerGitHubCiBuild() }, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Trigger CI Build")
+                }
+                if (!apkBuildState.githubTokenTestResult.isNullOrBlank()) {
+                    Text(
+                        text = apkBuildState.githubTokenTestResult.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (apkBuildState.githubTokenTestSucceeded == true) NeuralMint else StatusCrimson
+                    )
                 }
             }
         }
@@ -378,10 +390,16 @@ fun ApkBuildCenterScreen(viewModel: TeenaViewModel) {
                     Text("${b.buildSource} v${b.versionName} (${b.versionCode})", style = MaterialTheme.typography.titleSmall)
                     StatusPill(b.status)
                 }
-                Text("SHA256: ${b.sha256Checksum.take(36)}...", style = MaterialTheme.typography.labelSmall, color = NeuralCyan)
-                Text(b.logs, style = MaterialTheme.typography.bodySmall)
-                if (b.downloadUrl.isNotBlank()) {
-                    OutlinedButton(onClick = { viewModel.openExternalUrl(b.downloadUrl) }) { Text("Open Release") }
+                Text("SHA256: ${b.sha256Checksum.take(36)}... • Size: ${b.apkSizeBytes / 1024} KB", style = MaterialTheme.typography.labelSmall, color = NeuralCyan)
+                Text(b.logs.take(240), style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (b.apkLocalPath.isNotBlank()) {
+                        FilledTonalButton(onClick = { viewModel.reinstallFromBuildRecord(b) }) { Text("Re-install") }
+                    }
+                    if (b.downloadUrl.isNotBlank()) {
+                        OutlinedButton(onClick = { viewModel.openExternalUrl(b.downloadUrl) }) { Text("Open URL") }
+                    }
+                    OutlinedButton(onClick = { viewModel.deleteBuildRecord(b) }) { Text("Delete") }
                 }
             }
         }

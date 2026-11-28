@@ -139,31 +139,67 @@ class OfflineCapabilitiesEngine(private val context: Context) {
                 val dest = prompt.substringAfter(" to ").trim()
                 return OfflineIntentResult(true, lang, "NAVIGATE", dest, "Launching Google Maps navigation to $dest.")
             }
+            lower == "apk banao" || lower.contains("apk banao") || lower == "build apk" ||
+                lower.contains("apk build karo") || lower.contains("create apk") ||
+                lower.contains("make apk") -> {
+                return OfflineIntentResult(
+                    true,
+                    lang,
+                    "BUILD_APK",
+                    null,
+                    "Dev Studio APK Build shuru kar rahi hoon."
+                )
+            }
+            lower == "shorts banao" || lower.contains("shorts banao") ||
+                lower.contains("reel banao") || lower == "open shorts" ||
+                lower.contains("create short") || lower.contains("shorts creator") -> {
+                return OfflineIntentResult(
+                    true,
+                    lang,
+                    "OPEN_SHORTS",
+                    null,
+                    "Teena Shorts Creator open kar rahi hoon."
+                )
+            }
         }
 
-        // Local Knowledge Base retrieval (BM25/Token-overlap scoring)
+        // Local Knowledge Base retrieval (BM25/Token-overlap scoring, de-duplicated)
         val queryTerms = lower.split(Regex("[^a-z0-9\u0600-\u06FF]+")).filter { it.length >= 2 }.toSet()
         val matchedMemories = memories.map { mem ->
             val hay = "${mem.category} ${mem.factKey} ${mem.factValue}".lowercase()
             val score = queryTerms.count { hay.contains(it) }
             mem to score
-        }.filter { it.second > 0 }.sortedByDescending { it.second }.take(3)
+        }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .distinctBy { (m, _) ->
+                "${m.category.trim().lowercase()}|${m.factKey.trim().lowercase()}|${m.factValue.trim().lowercase()}"
+            }
+            .take(3)
 
         val matchedResearch = research.map { res ->
             val hay = "${res.title} ${res.summary}".lowercase()
             val score = queryTerms.count { hay.contains(it) }
             res to score
-        }.filter { it.second > 0 }.sortedByDescending { it.second }.take(2)
+        }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .distinctBy { (r, _) ->
+                "${r.title.trim().lowercase()}|${r.sourceUrl.trim().lowercase()}"
+            }
+            .take(2)
 
         if (matchedMemories.isNotEmpty() || matchedResearch.isNotEmpty()) {
-            val sb = StringBuilder()
-            sb.appendLine("[Offline Knowledge Retrieval | $lang]")
+            val bullets = linkedSetOf<String>()
             matchedMemories.forEach { (m, _) ->
-                sb.appendLine("• Memory (${m.category}): ${m.factKey} — ${m.factValue}")
+                bullets.add("• Memory (${m.category}): ${m.factKey} — ${m.factValue}")
             }
             matchedResearch.forEach { (r, _) ->
-                sb.appendLine("• Research (${r.sourceType}): ${r.title} — ${r.summary.take(180)} (${r.sourceUrl})")
+                bullets.add("• Research (${r.sourceType}): ${r.title} — ${r.summary.take(180)} (${r.sourceUrl})")
             }
+            val sb = StringBuilder()
+            sb.appendLine("[Offline Knowledge Retrieval | $lang]")
+            bullets.forEach { sb.appendLine(it) }
             return OfflineIntentResult(true, lang, null, null, sb.toString().trim())
         }
 

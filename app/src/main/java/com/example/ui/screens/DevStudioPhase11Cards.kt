@@ -54,15 +54,18 @@ import java.util.Locale
 fun DevStudioAiCopilotCard(
     selectedFilePath: String,
     targetFileFallback: String,
+    activeGeminiModel: String,
     routingStrategy: RoutingCostStrategy,
     dynamicRoutingEnabled: Boolean,
     routerDecision: RouterDecision?,
     aiReply: String,
     aiError: String?,
     isBusy: Boolean,
+    hasLastPrompt: Boolean,
     emergencyStopped: Boolean,
     onCycleStrategy: () -> Unit,
     onGenerateCode: (prompt: String, targetFileName: String) -> Unit,
+    onRetry: () -> Unit,
     onApplyCodeToFile: (targetFileName: String) -> Unit
 ) {
     var aiPrompt by remember { mutableStateOf("") }
@@ -74,7 +77,7 @@ fun DevStudioAiCopilotCard(
     ) {
         SectionHeader(
             title = "Phase 11 AI Code Co-Pilot",
-            subtitle = "Router selects Gemini, Groq, or OpenRouter by prompt complexity & cost • Target: $activeTarget",
+            subtitle = "Shared Gemini Engine ($activeGeminiModel) • Same key as Chat • Target: $activeTarget",
             trailing = {
                 AssistChip(
                     onClick = onCycleStrategy,
@@ -94,12 +97,12 @@ fun DevStudioAiCopilotCard(
         if (routerDecision != null) {
             val selectedProfile = routerDecision.costProfiles[routerDecision.selectedProvider]
             val costText = when {
-                selectedProfile == null -> ""
+                selectedProfile == null -> activeGeminiModel
                 selectedProfile.isFreeTier -> "FREE ($0.00)"
                 else -> "~$${"%.5f".format(Locale.US, selectedProfile.estimatedCostUsd)}"
             }
             Text(
-                text = "Routed: ${routerDecision.selectedProvider.displayName} • ${routerDecision.evaluation.complexityTier.name} • $costText",
+                text = "Routed: ${routerDecision.selectedProvider.displayName} ($activeGeminiModel) • ${routerDecision.evaluation.complexityTier.name} • $costText",
                 style = MaterialTheme.typography.labelMedium,
                 color = NeuralCyan,
                 fontWeight = FontWeight.SemiBold,
@@ -107,7 +110,7 @@ fun DevStudioAiCopilotCard(
             )
         } else {
             Text(
-                text = "Router ready (${routingStrategy.name.replace("_", " ")}). Describe a script, bug fix, or CLI tool.",
+                text = "Gemini ready ($activeGeminiModel). Ask a coding question or request a script.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag("dev_studio_ai_decision_text")
@@ -135,7 +138,7 @@ fun DevStudioAiCopilotCard(
         OutlinedTextField(
             value = aiPrompt,
             onValueChange = { aiPrompt = it },
-            label = { Text("Ask AI Coder for $activeTarget...") },
+            label = { Text("Ask Gemini for $activeTarget...") },
             maxLines = 3,
             modifier = Modifier
                 .fillMaxWidth()
@@ -161,7 +164,7 @@ fun DevStudioAiCopilotCard(
                     Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
                 }
                 Spacer(Modifier.size(6.dp))
-                Text(if (isBusy) "Generating..." else "Ask AI Coder", maxLines = 1)
+                Text(if (isBusy) "Asking..." else "Ask", maxLines = 1)
             }
 
             FilledTonalButton(
@@ -178,11 +181,36 @@ fun DevStudioAiCopilotCard(
         }
 
         if (!aiError.isNullOrBlank()) {
-            Text(
-                text = aiError,
-                style = MaterialTheme.typography.bodySmall,
-                color = StatusCrimson
-            )
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = StatusCrimson.copy(alpha = 0.14f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dev_studio_ai_error")
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = aiError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StatusCrimson,
+                        modifier = Modifier.testTag("dev_studio_ai_error_text")
+                    )
+                    if (hasLastPrompt && !emergencyStopped) {
+                        OutlinedButton(
+                            onClick = onRetry,
+                            enabled = !isBusy,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("dev_studio_ai_retry_btn")
+                        ) {
+                            Text("Retry", maxLines = 1)
+                        }
+                    }
+                }
+            }
         }
 
         if (aiReply.isNotBlank()) {

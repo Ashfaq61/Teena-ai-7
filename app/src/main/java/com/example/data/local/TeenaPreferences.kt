@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.ai.GeminiRepository
 import com.example.ai.RoutingCostStrategy
 import com.example.ai.TeenaIdentityEngine
 import com.example.ai.TeenaIdentityProfile
@@ -56,9 +57,18 @@ data class TeenaSettings(
     val triggerMonitorEnabled: Boolean = false,
     // Phase 8: Optional Device Admin opt-in toggle (default OFF; user must also enable in Android Settings)
     val directDeviceAdminEnabled: Boolean = false,
-    // Dynamic Prompt Router (Gemini / Groq / OpenRouter)
+    // Dynamic Prompt Router (Gemini / Groq / OpenRouter) & Shared Gemini Text Model
     val dynamicPromptRoutingEnabled: Boolean = true,
-    val routingCostStrategy: String = RoutingCostStrategy.BALANCED.name
+    val routingCostStrategy: String = RoutingCostStrategy.BALANCED.name,
+    val geminiTextModel: String = GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL,
+    // Phase 11D: Dev Studio Free APK Build System
+    val githubPrivateRepo: Boolean = false,
+    val devBuildMode: String = "CLOUD_GITHUB", // CLOUD_GITHUB or LOCAL_ON_DEVICE
+    val devBuildType: String = "DEBUG",       // DEBUG or RELEASE
+    val devAutoBumpVersion: Boolean = true,
+    val devVersionCode: Int = 1,
+    val devVersionName: String = "1.0.0",
+    val devLocalAapt2Path: String = ""
 )
 
 fun TeenaSettings.toIdentityProfile(): TeenaIdentityProfile = TeenaIdentityProfile(
@@ -110,6 +120,14 @@ class TeenaPreferences(private val context: Context) {
         val DIRECT_DEVICE_ADMIN_ENABLED = booleanPreferencesKey("direct_device_admin_enabled")
         val DYNAMIC_PROMPT_ROUTING_ENABLED = booleanPreferencesKey("dynamic_prompt_routing_enabled")
         val ROUTING_COST_STRATEGY = stringPreferencesKey("routing_cost_strategy")
+        val GEMINI_TEXT_MODEL = stringPreferencesKey("gemini_text_model")
+        val GITHUB_PRIVATE_REPO = booleanPreferencesKey("github_private_repo")
+        val DEV_BUILD_MODE = stringPreferencesKey("dev_build_mode")
+        val DEV_BUILD_TYPE = stringPreferencesKey("dev_build_type")
+        val DEV_AUTO_BUMP_VERSION = booleanPreferencesKey("dev_auto_bump_version")
+        val DEV_VERSION_CODE = intPreferencesKey("dev_version_code")
+        val DEV_VERSION_NAME = stringPreferencesKey("dev_version_name")
+        val DEV_LOCAL_AAPT2_PATH = stringPreferencesKey("dev_local_aapt2_path")
     }
 
     val settingsFlow: Flow<TeenaSettings> = context.teenaDataStore.data.map { prefs ->
@@ -149,7 +167,15 @@ class TeenaPreferences(private val context: Context) {
             triggerMonitorEnabled = prefs[Keys.TRIGGER_MONITOR_ENABLED] ?: false,
             directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false,
             dynamicPromptRoutingEnabled = prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] ?: true,
-            routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name
+            routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name,
+            geminiTextModel = GeminiRepository.normalizeModelId(prefs[Keys.GEMINI_TEXT_MODEL]),
+            githubPrivateRepo = prefs[Keys.GITHUB_PRIVATE_REPO] ?: false,
+            devBuildMode = prefs[Keys.DEV_BUILD_MODE] ?: "CLOUD_GITHUB",
+            devBuildType = prefs[Keys.DEV_BUILD_TYPE] ?: "DEBUG",
+            devAutoBumpVersion = prefs[Keys.DEV_AUTO_BUMP_VERSION] ?: true,
+            devVersionCode = (prefs[Keys.DEV_VERSION_CODE] ?: 1).coerceAtLeast(1),
+            devVersionName = prefs[Keys.DEV_VERSION_NAME]?.takeIf { it.isNotBlank() } ?: "1.0.0",
+            devLocalAapt2Path = prefs[Keys.DEV_LOCAL_AAPT2_PATH] ?: ""
         )
     }
 
@@ -193,7 +219,15 @@ class TeenaPreferences(private val context: Context) {
                 triggerMonitorEnabled = prefs[Keys.TRIGGER_MONITOR_ENABLED] ?: false,
                 directDeviceAdminEnabled = prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] ?: false,
                 dynamicPromptRoutingEnabled = prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] ?: true,
-                routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name
+                routingCostStrategy = prefs[Keys.ROUTING_COST_STRATEGY] ?: RoutingCostStrategy.BALANCED.name,
+                geminiTextModel = GeminiRepository.normalizeModelId(prefs[Keys.GEMINI_TEXT_MODEL]),
+                githubPrivateRepo = prefs[Keys.GITHUB_PRIVATE_REPO] ?: false,
+                devBuildMode = prefs[Keys.DEV_BUILD_MODE] ?: "CLOUD_GITHUB",
+                devBuildType = prefs[Keys.DEV_BUILD_TYPE] ?: "DEBUG",
+                devAutoBumpVersion = prefs[Keys.DEV_AUTO_BUMP_VERSION] ?: true,
+                devVersionCode = (prefs[Keys.DEV_VERSION_CODE] ?: 1).coerceAtLeast(1),
+                devVersionName = prefs[Keys.DEV_VERSION_NAME]?.takeIf { it.isNotBlank() } ?: "1.0.0",
+                devLocalAapt2Path = prefs[Keys.DEV_LOCAL_AAPT2_PATH] ?: ""
             )
             val next = transform(current)
             prefs[Keys.DARK_THEME] = next.darkTheme
@@ -232,6 +266,14 @@ class TeenaPreferences(private val context: Context) {
             prefs[Keys.DIRECT_DEVICE_ADMIN_ENABLED] = next.directDeviceAdminEnabled
             prefs[Keys.DYNAMIC_PROMPT_ROUTING_ENABLED] = next.dynamicPromptRoutingEnabled
             prefs[Keys.ROUTING_COST_STRATEGY] = next.routingCostStrategy
+            prefs[Keys.GEMINI_TEXT_MODEL] = GeminiRepository.normalizeModelId(next.geminiTextModel)
+            prefs[Keys.GITHUB_PRIVATE_REPO] = next.githubPrivateRepo
+            prefs[Keys.DEV_BUILD_MODE] = next.devBuildMode
+            prefs[Keys.DEV_BUILD_TYPE] = next.devBuildType
+            prefs[Keys.DEV_AUTO_BUMP_VERSION] = next.devAutoBumpVersion
+            prefs[Keys.DEV_VERSION_CODE] = next.devVersionCode.coerceAtLeast(1)
+            prefs[Keys.DEV_VERSION_NAME] = next.devVersionName.ifBlank { "1.0.0" }
+            prefs[Keys.DEV_LOCAL_AAPT2_PATH] = next.devLocalAapt2Path
         }
     }
 }

@@ -3,7 +3,9 @@ package com.example
 import com.example.ai.AiBrainEngine
 import com.example.ai.CapabilitySummaryAnalyzer
 import com.example.ai.DeclarativeToolSpec
+import com.example.ai.ErrorDoctorEngine
 import com.example.ai.GeminiLiveVoiceManager
+import com.example.ai.GeminiRepository
 import com.example.ai.LiveKitMediaState
 import com.example.ai.LyriaModelMode
 import com.example.ai.LyriaMusicEngine
@@ -17,6 +19,10 @@ import com.example.ai.PromptComplexityTier
 import com.example.ai.ScreenActionKind
 import com.example.ai.ScreenAgentDecision
 import com.example.ai.ScreenVisionAgentEngine
+import com.example.ai.ShortsBackgroundTheme
+import com.example.ai.ShortsSceneTransition
+import com.example.ai.ShortsScriptEngine
+import com.example.ai.ShortsVibePreset
 import com.example.ai.SocialTaskControl
 import com.example.ai.SocialTaskDriver
 import com.example.ai.SocialTaskEngine
@@ -47,9 +53,13 @@ import com.example.system.MapsLocationEngine
 import com.example.system.TeenaSpeechHelper
 import com.example.system.TeenaTriggerLogic
 import com.example.data.remote.GeminiModelInfo
+import com.example.data.remote.GitHubActionsBuildClient
 import com.example.data.remote.ModelRegistry
+import com.example.system.DevApkBuildManager
+import com.example.system.DevBuildType
 import com.example.system.DevStudioBridge
 import com.example.system.DevStudioEngine
+import com.example.system.ShortsVideoExporter
 import com.example.system.SocialPlatform
 import com.example.system.TeenaFaceDetectionEngine
 import com.example.system.TeenaFirebaseBridge
@@ -1268,6 +1278,203 @@ class TeenaPureLogicUnitTest {
         assertEquals("slot_groq", orderedSlots.first().slotId)
         assertEquals("slot_custom", orderedSlots[orderedSlots.size - 2].slotId)
         assertEquals("slot_offline", orderedSlots.last().slotId)
+    }
+
+    @Test
+    fun geminiRepositoryModelConstantAndHinglishErrorFormattingWorkCleanly() {
+        assertEquals("gemini-2.5-flash", GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL)
+        assertEquals(GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL, GeminiRepository.normalizeModelId(""))
+        assertEquals(GeminiRepository.DEFAULT_GEMINI_TEXT_MODEL, GeminiRepository.normalizeModelId("   "))
+        assertEquals("gemini-2.5-pro", GeminiRepository.normalizeModelId("models/gemini-2.5-pro"))
+
+        val noKeyErr = GeminiRepository.formatHinglishError(IllegalStateException("Gemini API key missing"))
+        assertTrue(noKeyErr.userMessageHinglish.contains("API key set nahi hai"))
+        assertTrue(noKeyErr.message.orEmpty().contains("Raw:"))
+
+        val offlineErr = GeminiRepository.formatHinglishError(java.net.UnknownHostException("Unable to resolve host generativelanguage.googleapis.com"))
+        assertTrue(offlineErr.userMessageHinglish.contains("Internet connection nahi hai"))
+        assertTrue(offlineErr.message.orEmpty().contains("Raw:"))
+
+        val authErr = GeminiRepository.formatHinglishError(GeminiHttpException(401, "UNAUTHENTICATED", "API_KEY_INVALID"))
+        assertEquals(401, authErr.httpCode)
+        assertTrue(authErr.userMessageHinglish.contains("401"))
+        assertTrue(authErr.userMessageHinglish.contains("galat"))
+
+        val modelErr = GeminiRepository.formatHinglishError(GeminiHttpException(404, "NOT_FOUND", "models/bad-model is not found"), "bad-model")
+        assertEquals(404, modelErr.httpCode)
+        assertTrue(modelErr.userMessageHinglish.contains("404"))
+        assertTrue(modelErr.userMessageHinglish.contains("bad-model"))
+
+        val quotaErr = GeminiRepository.formatHinglishError(GeminiHttpException(429, "RESOURCE_EXHAUSTED", "Quota exceeded"))
+        assertEquals(429, quotaErr.httpCode)
+        assertTrue(quotaErr.userMessageHinglish.contains("429"))
+        assertTrue(quotaErr.userMessageHinglish.contains("quota", ignoreCase = true))
+
+        val stopErr = GeminiRepository.formatHinglishError(SecurityException("Blocked by Emergency Stop"))
+        assertTrue(stopErr.userMessageHinglish.contains("Emergency Stop"))
+    }
+
+    @Test
+    fun errorDoctorParsesGradleErrorsMatchesKnownImportsAndEnforcesMax3Loops() {
+        val tempDir = Files.createTempDirectory("teena_doctor_test").toFile()
+        try {
+            val ktFile = File(tempDir, "app/src/main/java/com/example/MainActivity.kt").apply {
+                parentFile?.mkdirs()
+                writeText(
+                    """
+                    package com.example
+
+                    import androidx.compose.runtime.Composable
+
+                    @Composable
+                    fun Greeting() {
+                        LaunchedEffect(Unit) {}
+                    }
+                    """.trimIndent() + "\n"
+                )
+            }
+            val rawLog = """
+                e: file://${ktFile.absolutePath}:7:5 Unresolved reference: LaunchedEffect
+                * What went wrong:
+                Execution failed for task ':app:compileDebugKotlin'.
+                > Compilation error. See log for more details.
+                * Try:
+                > Run with --stacktrace
+            """.trimIndent()
+
+            val doctor = ErrorDoctorEngine()
+
+            val report = doctor.analyzeGradleFailure(
+                rawLog = rawLog,
+                workspaceDir = tempDir,
+                fixHistory = emptyList(),
+                attemptNumber = 1
+            )
+            assertFalse(report.exhaustedAutoLoop)
+            assertEquals(1, report.errorLines.size)
+            assertEquals("app/src/main/java/com/example/MainActivity.kt", report.errorLines.first().relativeWorkspacePath)
+            assertTrue(report.errorLines.first().hinglishExplanation.contains("LaunchedEffect"))
+            assertTrue(report.whatWentWrongBlock.contains("compileDebugKotlin"))
+
+            val patch = report.patchProposal
+            assertTrue(patch != null)
+            assertEquals("KNOWN_PATTERN", patch!!.strategy)
+            assertTrue(patch.diffPreview.contains("+import androidx.compose.runtime.LaunchedEffect"))
+
+            val appliedFile = doctor.applyPatchProposal(tempDir, patch).getOrThrow()
+            assertTrue(appliedFile.readText().contains("import androidx.compose.runtime.LaunchedEffect"))
+
+            val exhausted = doctor.analyzeGradleFailure(
+                rawLog = rawLog,
+                workspaceDir = tempDir,
+                fixHistory = emptyList(),
+                attemptNumber = ErrorDoctorEngine.MAX_ATTEMPTS
+            )
+            assertTrue(exhausted.exhaustedAutoLoop)
+            assertNull(exhausted.patchProposal)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun gitHubActionsBuildClientClassifiesErrorsAndComputesGitBlobSha1() {
+        val content = "hello".toByteArray(Charsets.UTF_8)
+        assertEquals("b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0", GitHubActionsBuildClient.computeGitBlobSha1(content))
+
+        assertEquals("BAD_TOKEN", GitHubActionsBuildClient.classifyHttpFailure("Token", 401, "{}").category)
+        assertEquals("MISSING_PERMISSION", GitHubActionsBuildClient.classifyHttpFailure("Push", 403, "{}").category)
+        assertEquals("RATE_LIMIT", GitHubActionsBuildClient.classifyHttpFailure("Poll", 403, """{"message":"API rate limit exceeded"}""", "0").category)
+        assertEquals("RATE_LIMIT", GitHubActionsBuildClient.classifyHttpFailure("Poll", 429, "{}").category)
+        assertEquals("WORKFLOW_NOT_FOUND", GitHubActionsBuildClient.classifyHttpFailure("Dispatch workflow", 404, "{}").category)
+        assertEquals("REPO_NAME_TAKEN", GitHubActionsBuildClient.classifyHttpFailure("Create repo", 422, """{"errors":[{"message":"name already exists"}]}""").category)
+        assertEquals("NO_INTERNET", GitHubActionsBuildClient.wrapNetworkThrowable("Push", java.net.UnknownHostException("api.github.com")).category)
+    }
+
+    @Test
+    fun devApkWorkflowGenerationAndVersionBumpWorkCleanly() {
+        val debugYml = DevApkBuildManager.generateGitHubBuildWorkflowYml(DevBuildType.DEBUG, includeRelease = false)
+        assertTrue(debugYml.contains("java-version: '17'"))
+        assertTrue(debugYml.contains("gradle/actions/setup-gradle@v4"))
+        assertTrue(debugYml.contains("./gradlew assembleDebug --stacktrace"))
+        assertTrue(debugYml.contains("actions/upload-artifact@v4"))
+        assertFalse(debugYml.contains("softprops/action-gh-release"))
+
+        val releaseYml = DevApkBuildManager.generateGitHubBuildWorkflowYml(DevBuildType.RELEASE, includeRelease = true)
+        assertTrue(releaseYml.contains("./gradlew assembleRelease --stacktrace"))
+        assertTrue(releaseYml.contains("softprops/action-gh-release@v2"))
+
+        assertEquals("1.0.5", DevApkBuildManager.bumpVersionNamePatch("1.0.4"))
+    }
+
+    @Test
+    fun phase13ShortsScriptEngineParsesJsonResolvesTimelineWrapsCaptionsAndConvertsYuv() {
+        val rawAiJson = """
+            ```json
+            {
+              "title": "3 Coding Hacks",
+              "hook": "WAIT! Ye shortcuts try karo",
+              "hashtags": "#coding #shorts",
+              "scenes": [
+                {
+                  "headline": "Hack 1",
+                  "captionText": "Ctrl+Shift+P opens command palette instantly",
+                  "voiceoverLine": "Pehla hack command palette kholna hai.",
+                  "durationSec": 4.0,
+                  "theme": "ROYAL_VIOLET",
+                  "transition": "PAN_LEFT"
+                },
+                {
+                  "headline": "Hack 2",
+                  "captionText": "Use multi-cursor to edit 10 lines together",
+                  "voiceoverLine": "Doosra hack multi cursor editing hai.",
+                  "durationSec": 25.0,
+                  "theme": "EMERALD_NEON",
+                  "transition": "PULSE"
+                }
+              ]
+            }
+            ```
+        """.trimIndent()
+
+        val parsed = ShortsScriptEngine.parseStoryboardFromResponse(
+            raw = rawAiJson,
+            fallbackTopic = "Coding Hacks",
+            vibe = ShortsVibePreset.HINGLISH_TECH,
+            targetSec = 20
+        )
+        assertEquals("3 Coding Hacks", parsed.title)
+        assertEquals("WAIT! Ye shortcuts try karo", parsed.hook)
+        assertEquals(2, parsed.scenes.size)
+        assertEquals(ShortsBackgroundTheme.ROYAL_VIOLET, parsed.scenes[0].theme)
+        assertEquals(ShortsSceneTransition.PAN_LEFT, parsed.scenes[0].transition)
+        // Clamped max 12s per scene
+        assertEquals(12f, parsed.scenes[1].durationSec)
+        assertEquals(16_000L, parsed.totalDurationMs())
+
+        val frame1 = ShortsScriptEngine.resolveActiveSceneAt(parsed.scenes, 2_000L)!!
+        assertEquals(0, frame1.sceneIndex)
+        assertEquals(0.5f, frame1.sceneProgress, 0.01f)
+
+        val frame2 = ShortsScriptEngine.resolveActiveSceneAt(parsed.scenes, 10_000L)!!
+        assertEquals(1, frame2.sceneIndex)
+        assertEquals(0.5f, frame2.sceneProgress, 0.01f)
+
+        val wrapped = ShortsScriptEngine.wrapCaptionLines(
+            "Ye ek lamba Hinglish caption hai jo 9:16 screen par fit hona chahiye",
+            maxCharsPerLine = 20
+        )
+        assertTrue(wrapped.size in 2..4)
+        assertTrue(wrapped.all { it.length <= 20 })
+
+        // YUV420 NV12 / I420 buffer size check (4x4 = 16 * 1.5 = 24 bytes)
+        val pixels = IntArray(4 * 4) { 0xFFFFFFFF.toInt() }
+        val nv12 = ShortsVideoExporter.argbToYuv420(pixels, 4, 4, semiPlanar = true)
+        val i420 = ShortsVideoExporter.argbToYuv420(pixels, 4, 4, semiPlanar = false)
+        assertEquals(24, nv12.size)
+        assertEquals(24, i420.size)
+        // White pixel Y luma should be ~235
+        assertTrue((nv12[0].toInt() and 0xFF) >= 220)
     }
 
     private fun writeSingleEntryTarGz(dest: File, entryName: String, content: String) {

@@ -275,11 +275,32 @@ interface SystemRecordsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBuildRecord(record: BuildRecordEntity): Long
 
+    @Query("DELETE FROM build_records WHERE id = :id")
+    suspend fun deleteBuildRecord(id: Long)
+
     @Query("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 200")
     fun observeAuditLogs(): Flow<List<AuditLogEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLog(log: AuditLogEntity): Long
+}
+
+@Dao
+interface ErrorDoctorFixDao {
+    @Query("SELECT * FROM error_doctor_fixes ORDER BY timestamp DESC LIMIT 100")
+    fun observeFixes(): Flow<List<ErrorDoctorFixEntity>>
+
+    @Query("SELECT * FROM error_doctor_fixes ORDER BY timestamp DESC LIMIT 100")
+    suspend fun getAllFixesOnce(): List<ErrorDoctorFixEntity>
+
+    @Query("SELECT * FROM error_doctor_fixes WHERE errorSignature = :signature ORDER BY timestamp DESC LIMIT 1")
+    suspend fun findBySignature(signature: String): ErrorDoctorFixEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertFix(entry: ErrorDoctorFixEntity): Long
+
+    @Query("DELETE FROM error_doctor_fixes")
+    suspend fun clearAll()
 }
 
 @Dao

@@ -9,6 +9,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.ai.AiBrainEngine
 import com.example.ai.ExternalAgentHub
+import com.example.ai.GeminiRepository
 import com.example.ai.MultiAgentOrchestrator
 import com.example.ai.OfflineCapabilitiesEngine
 import com.example.ai.SafeToolInterpreter
@@ -25,6 +26,7 @@ import com.example.data.local.MarketplaceToolEntity
 import com.example.data.local.MemoryFactEntity
 import com.example.data.local.ProviderSlotEntity
 import com.example.data.local.ProviderType
+import com.example.data.local.ResearchEntryEntity
 import com.example.data.local.TeenaDatabase
 import com.example.data.local.TeenaPreferences
 import com.example.data.remote.TeenaNetworkClients
@@ -1177,6 +1179,125 @@ class TeenaCoreUnitTest {
         } finally {
             server.close()
             vault.deleteSecret(AiBrainEngine.SLOT_GEMINI_PRIMARY)
+        }
+    }
+
+    @Test
+    fun sharedGeminiRepositoryHandlesSuccessErrorsAndOfflineDeduplication() = runBlocking {
+        val stopCtrl = EmergencyStopController()
+        val vault = KeystoreSecretVault(context)
+        val offlineEngine = OfflineCapabilitiesEngine(context)
+
+        // 1. OfflineCapabilitiesEngine deduplicates identical Memory & Research bullets
+        val dupMems = listOf(
+            MemoryFactEntity(category = "Tech", factKey = "Gemini", factValue = "Language model"),
+            MemoryFactEntity(category = "Tech", factKey = "Gemini", factValue = "Language model")
+        )
+        val dupResearch = listOf(
+            ResearchEntryEntity(sourceType = "WEB", title = "Gemini (language model)", summary = "Google multimodal AI", sourceUrl = "https://en.wikipedia.org/wiki/Gemini"),
+            ResearchEntryEntity(sourceType = "WEB", title = "Gemini (language model)", summary = "Google multimodal AI", sourceUrl = "https://en.wikipedia.org/wiki/Gemini")
+        )
+        val offlineRes = offlineEngine.evaluateLocalCommandOrKnowledge("Gemini", dupMems, dupResearch)
+        assertEquals(1, offlineRes.replyText.split("• Memory (Tech):").size - 1)
+        assertEquals(1, offlineRes.replyText.split("• Research (WEB): Gemini (language model)").size - 1)
+
+        // 2. Shared GeminiRepository with missing key returns clear Hinglish error (no Wikipedia fallback)
+        vault.deleteSecret(GeminiRepository.SLOT_GEMINI_PRIMARY)
+        val server = java.net.ServerSocket(0)
+        val port = server.localPort
+        var nextStatusCode = 200
+        var nextJsonBody = """{"candidates":[{"content":{"parts":[{"text":"Assalam o Alaikum! Main Teena hoon."}]}}]}"""
+        val serverThread = Thread {
+            try {
+                while (!server.isClosed) {
+                    val sock = server.accept()
+                    val input = sock.getInputStream()
+                    val headerBuf = java.io.ByteArrayOutputStream()
+                    var p3 = 0; var p2 = 0; var p1 = 0
+                    while (true) {
+                        val b = input.read()
+                        if (b < 0) break
+                        headerBuf.write(b)
+                        if (p3 == '\r'.code && p2 == '\n'.code && p1 == '\r'.code && b == '\n'.code) break
+                        p3 = p2; p2 = p1; p1 = b
+                    }
+                    val lines = headerBuf.toString(Charsets.UTF_8.name()).split("\r\n")
+                    val contentLen = lines.firstOrNull { it.startsWith("Content-Length:", true) }
+                        ?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
+                    if (contentLen > 0) {
+                        val buf = ByteArray(contentLen)
+                        var r = 0
+                        while (r < contentLen) {
+                            val n = input.read(buf, r, contentLen - r)
+                            if (n <= 0) break
+                            r += n
+                        }
+                    }
+                    val respBytes = nextJsonBody.toByteArray(Charsets.UTF_8)
+                    val out = sock.getOutputStream()
+                    out.write(
+                        ("HTTP/1.1 $nextStatusCode\r\nContent-Type: application/json\r\nContent-Length: ${respBytes.size}\r\nConnection: close\r\n\r\n")
+                            .toByteArray(Charsets.UTF_8)
+                    )
+                    out.write(respBytes)
+                    out.flush()
+                    sock.close()
+                }
+            } catch (_: Exception) {
+            }
+        }
+        serverThread.isDaemon = true
+        serverThread.start()
+
+        try {
+            val network = TeenaNetworkClients(db.geminiModelDao(), geminiBaseUrl = "http://127.0.0.1:$port", emergencyStopController = stopCtrl)
+            val repo = GeminiRepository(db, vault, network, offlineEngine, stopCtrl)
+            val aiBrain = AiBrainEngine(db, vault, network, offlineEngine, stopCtrl, geminiRepository = repo)
+            aiBrain.ensureDefaultProviderSlots()
+
+            val noKeyRes = repo.testHello()
+            assertTrue(noKeyRes.isFailure)
+            val noKeyMsg = noKeyRes.exceptionOrNull()?.message.orEmpty()
+            assertTrue(noKeyMsg.contains("Gemini is not available"))
+            assertTrue(noKeyMsg.contains("API key set nahi hai"))
+
+            // 3. Save key once -> AiBrainEngine & GeminiRepository resolve the exact same stored key
+            vault.saveSecret(GeminiRepository.SLOT_GEMINI_PRIMARY, "AIzaSySharedTestKey999")
+            assertEquals("AIzaSySharedTestKey999", aiBrain.resolvePrimaryGeminiSlotAndKey().second)
+            assertEquals("AIzaSySharedTestKey999", repo.resolvePrimarySlotAndKey().second)
+
+            // 4. Live 200 response for "hi"
+            val okRes = repo.testHello("gemini-2.5-flash").getOrThrow()
+            assertEquals("gemini-2.5-flash", okRes.modelUsed)
+            assertTrue(okRes.text.contains("Teena"))
+
+            // 5. HTTP 404 wrong model -> clear Hinglish + Raw error (never Wikipedia)
+            nextStatusCode = 404
+            nextJsonBody = """{"error":{"code":404,"message":"models/gemini-bad is not found"}}"""
+            val err404 = repo.testHello("gemini-bad")
+            assertTrue(err404.isFailure)
+            val msg404 = err404.exceptionOrNull()?.message.orEmpty()
+            assertTrue(msg404.contains("HTTP 404"))
+            assertTrue(msg404.contains("gemini-bad"))
+            assertTrue(msg404.contains("Raw:"))
+            assertFalse(msg404.contains("Wikipedia", ignoreCase = true))
+
+            // 6. HTTP 401 bad key
+            nextStatusCode = 401
+            nextJsonBody = """{"error":{"code":401,"message":"API key invalid"}}"""
+            val err401 = repo.testHello("gemini-2.5-flash")
+            assertTrue(err401.isFailure)
+            assertTrue(err401.exceptionOrNull()?.message.orEmpty().contains("HTTP 401"))
+
+            // 7. HTTP 429 quota
+            nextStatusCode = 429
+            nextJsonBody = """{"error":{"code":429,"message":"Rate limit exceeded"}}"""
+            val err429 = repo.testHello("gemini-2.5-flash")
+            assertTrue(err429.isFailure)
+            assertTrue(err429.exceptionOrNull()?.message.orEmpty().contains("HTTP 429"))
+        } finally {
+            server.close()
+            vault.deleteSecret(GeminiRepository.SLOT_GEMINI_PRIMARY)
         }
     }
 }

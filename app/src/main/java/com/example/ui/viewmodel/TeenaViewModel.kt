@@ -14,6 +14,7 @@ import com.example.ai.CapabilityGapReport
 import com.example.ai.CapabilitySummaryAnalyzer
 import com.example.ai.FeatureHealthItem
 import com.example.ai.GeminiLiveVoiceManager
+import com.example.ai.GeminiRepository
 import com.example.ai.LiveKitMediaState
 import com.example.ai.LiveTranscriptLine
 import com.example.ai.LiveVoiceState
@@ -22,6 +23,7 @@ import com.example.ai.LyriaGeneratedTrack
 import com.example.ai.LyriaModelMode
 import com.example.ai.LyriaPlaybackState
 import com.example.ai.PendingScreenActionConfirmation
+import com.example.ai.RoutedProvider
 import com.example.ai.RouterDecision
 import com.example.ai.RoutingCostStrategy
 import com.example.ai.ScreenWatchIndicatorState
@@ -92,6 +94,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -260,6 +263,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private var activeMusicJob: Job? = null
     private var activeWebsiteJob: Job? = null
     private var activeDevStudioAiJob: Job? = null
+    private var activeGeminiTestJob: Job? = null
+    private var activeDevStudioCommandJob: Job? = null
 
     private val _screenVisionAnswer = MutableStateFlow("")
     val screenVisionAnswer: StateFlow<String> = _screenVisionAnswer.asStateFlow()
@@ -274,14 +279,53 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
 
     // Phase 11: Dev Studio Engine (Linux inside Teena, Sandbox Editor, Terminal & AI Co-Pilot)
     val devStudioState: StateFlow<DevStudioEngineState> = container.devStudioEngine.state
+    val devApkCoordinator = DevStudioApkCoordinator(
+        appContext = getApplication(),
+        container = container,
+        scope = viewModelScope,
+        onBanner = { _statusBanner.value = it }
+    )
+    val devApkBuildState: StateFlow<DevApkBuildUiState> = devApkCoordinator.uiState
+    val errorDoctorFixes = db.errorDoctorFixDao().observeFixes()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Phase 13: Shorts Creator Coordinator
+    val shortsCoordinator = ShortsCoordinator(
+        appContext = getApplication(),
+        container = container,
+        scope = viewModelScope,
+        getGeminiModel = { settings.value.geminiTextModel },
+        isEmergencyStopped = { isEmergencyStopped.value },
+        onBanner = { _statusBanner.value = it }
+    )
+    val shortsState: StateFlow<ShortsCreatorUiState> = shortsCoordinator.uiState
+
+    private val _pendingNavRoute = MutableStateFlow<String?>(null)
+    val pendingNavRoute: StateFlow<String?> = _pendingNavRoute.asStateFlow()
+
+    fun clearPendingNavRoute() {
+        _pendingNavRoute.value = null
+    }
+
     private val _devStudioAiReply = MutableStateFlow("")
     val devStudioAiReply: StateFlow<String> = _devStudioAiReply.asStateFlow()
     private val _devStudioAiError = MutableStateFlow<String?>(null)
     val devStudioAiError: StateFlow<String?> = _devStudioAiError.asStateFlow()
     private val _isDevStudioAiBusy = MutableStateFlow(false)
     val isDevStudioAiBusy: StateFlow<Boolean> = _isDevStudioAiBusy.asStateFlow()
+    private val _devStudioLastPrompt = MutableStateFlow("")
+    val devStudioLastPrompt: StateFlow<String> = _devStudioLastPrompt.asStateFlow()
+    private val _devStudioLastTargetFile = MutableStateFlow("app.py")
     private val _devStudioRouterDecision = MutableStateFlow<RouterDecision?>(null)
     val devStudioRouterDecision: StateFlow<RouterDecision?> = _devStudioRouterDecision.asStateFlow()
+
+    // Settings Gemini model live test telemetry
+    private val _isTestingGemini = MutableStateFlow(false)
+    val isTestingGemini: StateFlow<Boolean> = _isTestingGemini.asStateFlow()
+    private val _geminiTestResult = MutableStateFlow<String?>(null)
+    val geminiTestResult: StateFlow<String?> = _geminiTestResult.asStateFlow()
+    private val _geminiTestSucceeded = MutableStateFlow<Boolean?>(null)
+    val geminiTestSucceeded: StateFlow<Boolean?> = _geminiTestSucceeded.asStateFlow()
 
     // Dynamic Prompt Router telemetry (Gemini / Groq / OpenRouter)
     val lastRouterDecision: StateFlow<RouterDecision?> = container.aiBrain.lastRouterDecision
@@ -390,6 +434,44 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     private val _diagnosticReport = MutableStateFlow("")
     val diagnosticReport: StateFlow<String> = _diagnosticReport.asStateFlow()
 
+    private val activeUiWorkFlow = combine(
+        _chatIsLoading,
+        _isDevStudioAiBusy,
+        _isBusy,
+        _isMusicGenerating,
+        _isWebsiteGenerating
+    ) { chatLoading, devAiBusy, busy, musicGen, websiteGen ->
+        chatLoading || devAiBusy || busy || musicGen || websiteGen
+    }
+
+    private val activeSystemWorkFlow = combine(
+        _isTestingGemini,
+        devStudioState,
+        devApkBuildState,
+        screenWatchState,
+        liveVoiceState
+    ) { testingGemini, devState, apkBuildState, watchState, voiceState ->
+        val devBusy = devState.isCommandRunning ||
+            devState.activeProcesses.isNotEmpty() ||
+            devState.phase in setOf(
+                com.example.system.DevStudioPhase.CHECKING_PREREQUISITES,
+                com.example.system.DevStudioPhase.DOWNLOADING,
+                com.example.system.DevStudioPhase.VERIFYING_SHA256,
+                com.example.system.DevStudioPhase.EXTRACTING,
+                com.example.system.DevStudioPhase.REPAIRING
+            )
+        val voiceActive = voiceState == LiveVoiceState.CONNECTING ||
+            voiceState == LiveVoiceState.LISTENING ||
+            voiceState == LiveVoiceState.THINKING ||
+            voiceState == LiveVoiceState.SPEAKING ||
+            voiceState == LiveVoiceState.RECONNECTING
+        testingGemini || devBusy || apkBuildState.isActive || watchState.isWatching || voiceActive
+    }
+
+    val hasActiveWork: StateFlow<Boolean> = combine(activeUiWorkFlow, activeSystemWorkFlow, shortsState) { uiActive, sysActive, shorts ->
+        uiActive || sysActive || shorts.isActive
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     init {
         viewModelScope.launch {
             val s = prefs.getSettingsSnapshot()
@@ -425,7 +507,39 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         _statusBanner.value = msg
     }
 
-    // --- Global Emergency Stop ---
+    // --- Active Request Cancellation & Global Emergency Stop ---
+    fun stopAllActiveRequestsAndResetUi() {
+        activeMissionJob?.cancel()
+        activePipelineJob?.cancel()
+        activeChatJob?.cancel()
+        activeScreenJob?.cancel()
+        activeMusicJob?.cancel()
+        activeWebsiteJob?.cancel()
+        activeDevStudioAiJob?.cancel()
+        activeGeminiTestJob?.cancel()
+        activeDevStudioCommandJob?.cancel()
+
+        liveVoiceManager.stopLiveSession(silent = true)
+        container.lyriaMusicEngine.stopPlayback()
+        container.devStudioEngine.killAllProcesses()
+        if (devApkBuildState.value.isActive) {
+            devApkCoordinator.cancelActiveBuild()
+        }
+        shortsCoordinator.cancelActiveWork()
+        container.networkClients.httpClient.dispatcher.cancelAll()
+        container.screenVisionAgent.pendingActionConfirmation.value?.respond(false)
+        container.speechHelper.stop()
+
+        _chatIsLoading.value = false
+        _chatStreamingText.value = ""
+        _isDevStudioAiBusy.value = false
+        _isMusicGenerating.value = false
+        _isWebsiteGenerating.value = false
+        _isTestingGemini.value = false
+        _isBusy.value = false
+        _statusBanner.value = "Stopped active request and reset UI."
+    }
+
     fun triggerEmergencyStop() {
         TeenaAccessibilityService.emergencyHaltActive = true
         container.emergencyStopController.triggerEmergencyStop()
@@ -435,16 +549,27 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         container.lyriaMusicEngine.stopPlayback()
         container.devStudioEngine.killAllProcesses()
         container.devStudioEngine.stopBridge()
+        if (devApkBuildState.value.isActive) {
+            devApkCoordinator.cancelActiveBuild()
+        }
+        shortsCoordinator.cancelActiveWork()
         container.networkClients.httpClient.dispatcher.cancelAll()
+        container.screenVisionAgent.pendingActionConfirmation.value?.respond(false)
         activeMissionJob?.cancel()
         activePipelineJob?.cancel()
         activeChatJob?.cancel()
         activeScreenJob?.cancel()
         activeMusicJob?.cancel()
         activeWebsiteJob?.cancel()
+        activeDevStudioAiJob?.cancel()
+        activeGeminiTestJob?.cancel()
+        activeDevStudioCommandJob?.cancel()
         _chatIsLoading.value = false
+        _chatStreamingText.value = ""
+        _isDevStudioAiBusy.value = false
         _isMusicGenerating.value = false
         _isWebsiteGenerating.value = false
+        _isTestingGemini.value = false
         _isBusy.value = false
         TeenaForegroundService.stop(getApplication())
         TeenaResearchScheduler.cancelAllResearchWork(getApplication())
@@ -676,7 +801,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                     autoFailover = activeSettings.autoFailoverProviders,
                     identityProfile = activeSettings.toIdentityProfile(),
                     dynamicRouting = activeSettings.dynamicPromptRoutingEnabled,
-                    routingStrategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy)
+                    routingStrategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy),
+                    preferredGeminiModel = GeminiRepository.normalizeModelId(activeSettings.geminiTextModel)
                 ).collect { chunk ->
                     when (chunk) {
                         is AiStreamChunk.Delta -> _chatStreamingText.value = chunk.accumulatedText
@@ -769,6 +895,15 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             }
             "NAVIGATE" -> container.mapsEngine.launchNavigation(arg.orEmpty())
                 .getOrElse { "Navigation failed: ${it.localizedMessage}" }
+            "BUILD_APK" -> {
+                _pendingNavRoute.value = "dev_studio"
+                devApkCoordinator.startBuildApk(0)
+                "Dev Studio khola gaya aur APK Build start ho gayi."
+            }
+            "OPEN_SHORTS" -> {
+                _pendingNavRoute.value = "shorts_creator"
+                "Teena Shorts Creator open ho raha hai."
+            }
             else -> "Executed $actionKey"
         }
     }
@@ -932,6 +1067,25 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                     },
                     onFailure = { it.localizedMessage ?: "Search error" }
                 )
+            }
+            "build_apk" -> {
+                _pendingNavRoute.value = "dev_studio"
+                devApkCoordinator.startBuildApk(0)
+                "Dev Studio APK Build pipeline started (${devApkBuildState.value.mode.label})."
+            }
+            "open_shorts_creator" -> {
+                _pendingNavRoute.value = "shorts_creator"
+                val topic = args["topic"].orEmpty().trim()
+                if (topic.isNotBlank()) {
+                    shortsCoordinator.generateScriptWithGemini(
+                        topic = topic,
+                        vibe = com.example.ai.ShortsVibePreset.HINGLISH_TECH,
+                        targetSec = 20
+                    )
+                    "Teena Shorts Creator opened aur '$topic' par script generate ho rahi hai."
+                } else {
+                    "Teena Shorts Creator open ho gaya hai."
+                }
             }
             else -> "Unknown tool $name"
         }
@@ -1933,15 +2087,22 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             container.networkClients.searchWeb(query)
                 .onSuccess { list ->
                     _webResults.value = list
+                    val existing = db.researchDao().getResearchOnce()
+                    val seenKeys = existing.mapTo(mutableSetOf()) {
+                        "${it.sourceUrl.trim().lowercase()}|${it.title.trim().lowercase()}"
+                    }
                     list.take(2).forEach { res ->
-                        db.researchDao().insertResearch(
-                            ResearchEntryEntity(
-                                sourceType = "WEB",
-                                title = res.title,
-                                summary = res.snippet,
-                                sourceUrl = res.url
+                        val dedupKey = "${res.url.trim().lowercase()}|${res.title.trim().lowercase()}"
+                        if (seenKeys.add(dedupKey)) {
+                            db.researchDao().insertResearch(
+                                ResearchEntryEntity(
+                                    sourceType = "WEB",
+                                    title = res.title,
+                                    summary = res.snippet,
+                                    sourceUrl = res.url
+                                )
                             )
-                        )
+                        }
                     }
                     _statusBanner.value = "Found ${list.size} web citations."
                 }
@@ -2091,8 +2252,9 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(githubOwner = owner.trim(), githubRepo = repo.trim(), githubWorkflowId = workflow.trim().ifBlank { "build-apk.yml" })
             }
             if (token.isNotBlank()) {
-                container.vault.saveSecret("slot_github_token", token)
+                container.vault.saveSecret("slot_github_token", token.trim())
             }
+            devApkCoordinator.refreshStatus()
             _statusBanner.value = "GitHub CI configuration saved securely."
         }
     }
@@ -2207,6 +2369,53 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
                         next.selfImproveIntervalHours
                     )
                 }
+            }
+        }
+    }
+
+    fun saveGeminiTextModel(rawModel: String) {
+        val normalized = GeminiRepository.normalizeModelId(rawModel)
+        updateSettings { it.copy(geminiTextModel = normalized) }
+        _statusBanner.value = "Gemini text model saved: $normalized"
+    }
+
+    fun testGeminiConnection(modelDraft: String? = null) {
+        if (isEmergencyStopped.value) {
+            _geminiTestSucceeded.value = false
+            _geminiTestResult.value =
+                "Gemini is not available — Emergency Stop active hai. Resume karein.\nRaw: Emergency Stop engaged"
+            return
+        }
+        activeGeminiTestJob?.cancel()
+        activeGeminiTestJob = viewModelScope.launch {
+            _isTestingGemini.value = true
+            val modelToUse = if (!modelDraft.isNullOrBlank()) {
+                GeminiRepository.normalizeModelId(modelDraft).also { cleanModel ->
+                    updateSettings { it.copy(geminiTextModel = cleanModel) }
+                }
+            } else {
+                GeminiRepository.normalizeModelId(settings.value.geminiTextModel)
+            }
+            _geminiTestSucceeded.value = null
+            _geminiTestResult.value = "Sending 'hi' to Gemini ($modelToUse)..."
+            try {
+                container.geminiRepository.testHello(modelToUse)
+                    .onSuccess { out ->
+                        _geminiTestSucceeded.value = true
+                        _geminiTestResult.value =
+                            "OK (${out.modelUsed}, ${out.latencyMs}ms): ${out.text.trim()}"
+                    }
+                    .onFailure { err ->
+                        _geminiTestSucceeded.value = false
+                        _geminiTestResult.value =
+                            SecurityAuditor.redactSecrets(err.message ?: "Gemini is not available")
+                    }
+            } catch (e: CancellationException) {
+                _geminiTestSucceeded.value = null
+                _geminiTestResult.value = "Gemini test stopped by user."
+                throw e
+            } finally {
+                _isTestingGemini.value = false
             }
         }
     }
@@ -2988,7 +3197,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
     fun runDevStudioTerminalCommand(command: String) {
         val clean = command.trim()
         if (clean.isEmpty()) return
-        viewModelScope.launch {
+        activeDevStudioCommandJob?.cancel()
+        activeDevStudioCommandJob = viewModelScope.launch {
             container.devStudioEngine.runSandboxCommand(clean)
                 .onFailure { err ->
                     _statusBanner.value = err.localizedMessage ?: "Command failed"
@@ -3000,11 +3210,22 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         container.devStudioEngine.clearTerminalHistory()
     }
 
+    fun retryDevStudioAi() {
+        val last = _devStudioLastPrompt.value
+        if (last.isBlank()) return
+        generateDevStudioCodeWithRouter(last, _devStudioLastTargetFile.value)
+    }
+
     fun generateDevStudioCodeWithRouter(prompt: String, targetFileName: String) {
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isEmpty()) return
+        _devStudioLastPrompt.value = cleanPrompt
+        _devStudioLastTargetFile.value = targetFileName.trim().ifBlank { "app.py" }
+
         if (isEmergencyStopped.value) {
-            _devStudioAiError.value = "Emergency Stop active — resume operations first."
+            _devStudioAiReply.value = ""
+            _devStudioAiError.value =
+                "Gemini is not available — Emergency Stop active hai. Resume karein.\nRaw: Emergency Stop engaged"
             return
         }
         activeDevStudioAiJob?.cancel()
@@ -3014,59 +3235,67 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
             _devStudioAiReply.value = ""
 
             val activeSettings = settings.value
+            val targetModel = GeminiRepository.normalizeModelId(activeSettings.geminiTextModel)
             val strategy = RoutingCostStrategy.fromString(activeSettings.routingCostStrategy)
             val currentFile = container.devStudioEngine.state.value.selectedFilePath.ifBlank {
                 targetFileName.trim().ifBlank { "app.py" }
             }
             val currentContent = container.devStudioEngine.state.value.selectedFileContent
-            val codingPrompt = buildString {
-                appendLine("Dev Studio task for sandbox file `$currentFile`:")
-                appendLine(cleanPrompt)
+            val devPrompt = buildString {
+                append(cleanPrompt)
                 if (currentContent.isNotBlank()) {
-                    appendLine("\nExisting file context (truncated to 2000 chars):")
+                    appendLine()
+                    appendLine()
+                    appendLine("Active Dev Studio file `$currentFile` context (truncated):")
                     appendLine("```")
                     appendLine(currentContent.take(2000))
                     appendLine("```")
                 }
-                append("Return clean runnable code inside a single fenced code block.")
             }
+            val systemInstruction = """
+                You are Teena Dev Studio Co-Pilot powered strictly by the shared Gemini engine.
+                Target sandbox file: $currentFile.
+                Answer questions clearly and concisely. When code is requested, return clean runnable code inside a single fenced code block.
+            """.trimIndent()
 
             _devStudioRouterDecision.value = container.promptRouter.route(
-                prompt = codingPrompt,
-                strategy = strategy
+                prompt = devPrompt,
+                strategy = strategy,
+                slotModels = mapOf(RoutedProvider.GEMINI to targetModel)
+            ).copy(
+                selectedProvider = RoutedProvider.GEMINI,
+                reason = "Shared GeminiRepository ($targetModel)"
             )
 
             try {
-                val mems = db.memoryFactDao().getAllMemoriesOnce()
-                container.aiBrain.generateStreamingChat(
-                    userPrompt = codingPrompt,
-                    recentHistory = emptyList(),
-                    memories = mems,
-                    autoFailover = activeSettings.autoFailoverProviders,
-                    identityProfile = activeSettings.toIdentityProfile(),
-                    dynamicRouting = activeSettings.dynamicPromptRoutingEnabled,
-                    routingStrategy = strategy
-                ).collect { chunk ->
-                    _devStudioRouterDecision.value = container.aiBrain.lastRouterDecision.value
-                        ?: _devStudioRouterDecision.value
-                    when (chunk) {
-                        is AiStreamChunk.Delta -> _devStudioAiReply.value = chunk.accumulatedText
-                        is AiStreamChunk.Completed -> {
-                            _devStudioAiReply.value = chunk.output.text
-                            _isDevStudioAiBusy.value = false
-                            _statusBanner.value = "Dev Studio AI (${chunk.output.providerUsed}) completed in ${chunk.output.latencyMs}ms"
-                        }
-                        is AiStreamChunk.Error -> {
-                            _devStudioAiError.value = SecurityAuditor.redactSecrets(chunk.message)
-                            _isDevStudioAiBusy.value = false
-                        }
-                    }
+                // Strictly use the shared GeminiRepository (same client & Keystore API key as Chat);
+                // NEVER fall back silently to Wikipedia or offline retrieval.
+                val res = container.geminiRepository.askDirectText(
+                    userPrompt = devPrompt,
+                    systemInstruction = systemInstruction,
+                    preferredModel = targetModel,
+                    onDelta = { acc -> _devStudioAiReply.value = acc }
+                )
+                res.onSuccess { out ->
+                    _devStudioAiReply.value = out.text
+                    _devStudioAiError.value = null
+                    _statusBanner.value = "Dev Studio Gemini (${out.modelUsed}) completed in ${out.latencyMs}ms"
+                }.onFailure { err ->
+                    _devStudioAiReply.value = ""
+                    _devStudioAiError.value = SecurityAuditor.redactSecrets(
+                        err.message ?: "Gemini is not available — Gemini call fail ho gayi."
+                    )
                 }
             } catch (e: CancellationException) {
                 _isDevStudioAiBusy.value = false
                 throw e
             } catch (e: Exception) {
-                _devStudioAiError.value = SecurityAuditor.redactSecrets(e.localizedMessage ?: "Dev Studio AI error")
+                val formatted = GeminiRepository.formatHinglishError(e, targetModel)
+                _devStudioAiReply.value = ""
+                _devStudioAiError.value = SecurityAuditor.redactSecrets(
+                    formatted.message ?: "Gemini is not available"
+                )
+            } finally {
                 _isDevStudioAiBusy.value = false
             }
         }
@@ -3087,6 +3316,8 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun killAllDevStudioProcesses() {
         activeDevStudioAiJob?.cancel()
+        activeDevStudioCommandJob?.cancel()
+        _isDevStudioAiBusy.value = false
         val count = container.devStudioEngine.killAllProcesses()
         _statusBanner.value = "Stopped $count active Dev Studio process(es)."
     }
@@ -3099,7 +3330,65 @@ class TeenaViewModel(application: Application) : AndroidViewModel(application) {
         _statusBanner.value = "Prompt Router strategy: ${next.name.replace("_", " ")}"
     }
 
+    // --- Phase 11D & 11E: Dev Studio Free APK Build + Error Doctor ---
+    fun refreshDevApkStatus() = devApkCoordinator.refreshStatus()
+    fun selectDevBuildMode(mode: com.example.system.DevBuildMode) = devApkCoordinator.selectBuildMode(mode)
+    fun selectDevBuildType(type: com.example.system.DevBuildType) = devApkCoordinator.selectBuildType(type)
+    fun setDevAutoBumpVersion(enabled: Boolean) = devApkCoordinator.setAutoBumpVersion(enabled)
+    fun setDevPrivateRepo(isPrivate: Boolean) = devApkCoordinator.setPrivateRepo(isPrivate)
+    fun saveDevGitHubConfig(owner: String, repo: String, isPrivate: Boolean, tokenInput: String) =
+        devApkCoordinator.saveGitHubConfig(owner, repo, isPrivate, tokenInput)
+    fun testDevGitHubToken(draftToken: String = "") = devApkCoordinator.testGitHubToken(draftToken)
+    fun startDevApkBuild() = devApkCoordinator.startBuildApk(0)
+    fun cancelDevApkBuild() = devApkCoordinator.cancelActiveBuild()
+    fun generateOrVerifyDevKeystore() = devApkCoordinator.generateOrVerifyKeystore()
+    fun exportDevKeystoreToUri(uri: Uri) = devApkCoordinator.exportKeystoreToUri(uri)
+    fun askGeminiForErrorDoctorFix() = devApkCoordinator.askGeminiForErrorDoctorFix()
+    fun applyErrorDoctorPatchAndRebuild() = devApkCoordinator.applyErrorDoctorPatchAndRebuild()
+    fun installBuiltDevApk() = devApkCoordinator.installBuiltApk()
+    fun shareBuiltDevApk() = devApkCoordinator.shareBuiltApk()
+    fun openUnknownAppsInstallSettings() = devApkCoordinator.openUnknownAppsSettings()
+    fun reinstallFromBuildRecord(record: BuildRecordEntity) = devApkCoordinator.reinstallFromBuildRecord(record)
+    fun deleteBuildRecord(record: BuildRecordEntity) = devApkCoordinator.deleteBuildRecord(record)
+
+    // --- Phase 13: Shorts Creator ---
+    fun generateShortsScript(topic: String, vibe: com.example.ai.ShortsVibePreset, targetSec: Int) =
+        shortsCoordinator.generateScriptWithGemini(topic, vibe, targetSec)
+    fun retryShortsScriptGeneration() = shortsCoordinator.retryLastScriptGeneration()
+    fun loadShortsTemplate(template: com.example.ai.ShortsProject) = shortsCoordinator.loadTemplate(template)
+    fun updateShortsMeta(title: String, hook: String, hashtags: String) =
+        shortsCoordinator.updateTitleAndMeta(title, hook, hashtags)
+    fun setShortsVoiceoverEnabled(enabled: Boolean) = shortsCoordinator.setVoiceoverEnabled(enabled)
+    fun setShortsWatermarkEnabled(enabled: Boolean) = shortsCoordinator.setWatermarkEnabled(enabled)
+    fun selectShortsResolution(resolution: com.example.ai.ShortsExportResolution) =
+        shortsCoordinator.selectResolution(resolution)
+    fun selectShortsLyriaTrack(track: LyriaGeneratedTrack) = shortsCoordinator.selectLyriaTrack(track)
+    fun attachShortsExternalAudio(uri: Uri) = shortsCoordinator.attachExternalAudioUri(uri)
+    fun clearShortsBgmAudio() = shortsCoordinator.clearBgmAudio()
+    fun selectShortsScene(index: Int) = shortsCoordinator.selectScene(index)
+    fun addShortsScene() = shortsCoordinator.addScene()
+    fun updateShortsScene(index: Int, transform: (com.example.ai.ShortsScene) -> com.example.ai.ShortsScene) =
+        shortsCoordinator.updateScene(index, transform)
+    fun moveShortsScene(index: Int, delta: Int) = shortsCoordinator.moveScene(index, delta)
+    fun deleteShortsScene(index: Int) = shortsCoordinator.deleteScene(index)
+    fun attachPhotoToShortsScene(index: Int, uri: Uri) = shortsCoordinator.attachPhotoToScene(index, uri)
+    fun clearShortsScenePhoto(index: Int) = shortsCoordinator.clearScenePhoto(index)
+    fun toggleShortsPreviewPlayback() = shortsCoordinator.togglePreviewPlayback()
+    fun restartShortsPreview() = shortsCoordinator.restartPreview()
+    fun seekShortsPreviewTo(ms: Long) = shortsCoordinator.seekPreviewTo(ms)
+    fun speakShortsNarration() = shortsCoordinator.speakPreviewNarration()
+    fun exportShortsMp4() = shortsCoordinator.exportMp4()
+    fun cancelShortsWork() = shortsCoordinator.cancelActiveWork()
+    fun saveShortsExportToMovies(record: com.example.ai.ShortsExportRecord) =
+        shortsCoordinator.saveExportToMovies(record)
+    fun shareShortsExport(record: com.example.ai.ShortsExportRecord) = shortsCoordinator.shareExport(record)
+    fun openShortsExportPreview(record: com.example.ai.ShortsExportRecord) =
+        shortsCoordinator.openExportInPreview(record)
+    fun closeShortsVideoPreview() = shortsCoordinator.closeVideoPreview()
+    fun deleteShortsExport(record: com.example.ai.ShortsExportRecord) = shortsCoordinator.deleteExport(record)
+
     override fun onCleared() {
+        shortsCoordinator.cancelActiveWork()
         container.speechHelper.shutdown()
         container.lyriaMusicEngine.release()
         container.voiceRoomConnector.leaveActiveRoom()

@@ -737,6 +737,7 @@ class DevStudioEngine(
         var killed = 0
         activeInstallJob?.cancel()
         activeInstallJob = null
+        isCommandRunning = false
 
         val entries = activeProcesses.entries.toList()
         entries.forEach { (id, managed) ->

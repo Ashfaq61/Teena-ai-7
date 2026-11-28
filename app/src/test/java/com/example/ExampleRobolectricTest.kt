@@ -21,6 +21,9 @@ import androidx.camera.core.ImageProxy
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.isSelected
+import com.example.ai.OfflineCapabilitiesEngine
+import com.example.core.security.KeystoreSecretVault
+import com.example.system.DevApkBuildManager
 import com.example.system.DevStudioEngine
 import com.example.system.DevStudioPhase
 import com.example.system.SketchFileProvider
@@ -65,7 +68,7 @@ class ExampleRobolectricTest {
     fun mainNavigationAndDashboardRender() {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("TEENA AI").assertIsDisplayed()
-        composeRule.onNodeWithTag("emergency_stop_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("emergency_stop_btn").assertDoesNotExist()
         composeRule.onNodeWithTag("nav_chat").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("chat_input_field").assertIsDisplayed()
@@ -599,6 +602,210 @@ class ExampleRobolectricTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithTag("chat_router_pill").assertTextContains("QUALITY FIRST", substring = true)
+    }
+
+    @Test
+    fun devStudioGeminiErrorRetrySettingsTestAndActiveStopButtonWorkCleanly() {
+        composeRule.waitForIdle()
+        // 1. Red STOP button stays hidden at idle
+        composeRule.onNodeWithTag("emergency_stop_btn").assertDoesNotExist()
+
+        // 2. Active Dev Studio Ask with no API key fails cleanly in Hinglish with Retry (never Wikipedia/Offline Knowledge Retrieval)
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_dev_studio"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_dev_studio").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_ai_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_ai_prompt_input").performScrollTo().performTextInput("hi")
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_ai_run_btn").performScrollTo().performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("dev_studio_ai_error_text")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("dev_studio_ai_error").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_ai_error_text").performScrollTo().assertTextContains("Gemini is not available", substring = true)
+        composeRule.onNodeWithTag("dev_studio_ai_error_text").assertTextContains("API key set nahi hai", substring = true)
+        composeRule.onNodeWithTag("dev_studio_ai_retry_btn").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_ai_output").assertDoesNotExist()
+
+        // 3. Settings shows configurable Gemini model field and "Test Gemini" button
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_settings"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_settings").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("settings_list").performScrollToNode(hasTestTag("settings_gemini_model_input"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_gemini_model_input").assertTextContains("gemini-2.5-flash", substring = true)
+        composeRule.onNodeWithTag("settings_test_gemini_btn").performScrollTo().performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("settings_test_gemini_result") and hasText("Gemini is not available", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("settings_test_gemini_result").performScrollTo().assertTextContains("Raw:", substring = true)
+
+        // 4. Red STOP button appears while an active request/process runs and cancels + resets UI when clicked
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_dev_studio"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_dev_studio").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_terminal_input"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_terminal_input").performScrollTo().performTextInput("sleep 10")
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_terminal_run_btn").performScrollTo().performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("emergency_stop_btn") and hasText("STOP", substring = true))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("emergency_stop_btn").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("emergency_stop_btn")).fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("emergency_stop_btn").assertDoesNotExist()
+    }
+
+    @Test
+    fun phase11DDevStudioApkBuildUiSettingsKeystoreZipAndVoiceIntentWorkCleanly() = kotlinx.coroutines.test.runTest {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Voice/chat command "apk banao" maps cleanly to BUILD_APK local action
+        val offline = OfflineCapabilitiesEngine(ctx)
+        val intent = offline.evaluateLocalCommandOrKnowledge("apk banao", emptyList(), emptyList())
+        assertTrue(intent.handledLocally)
+        assertEquals("BUILD_APK", intent.actionKey)
+
+        // 2. DevApkBuildManager: scaffold project, low-memory gradle.properties, pure-Java PKCS12 keystore & Zip-Slip defense
+        val vault = KeystoreSecretVault(ctx)
+        val mgr = DevApkBuildManager(ctx, vault)
+        val ws = java.io.File(ctx.filesDir, "test_ws_apk_${System.currentTimeMillis()}").apply { mkdirs() }
+        try {
+            mgr.ensureAndroidGradleProjectInWorkspace(ws, appName = "TestApp", versionCode = 3, versionName = "1.0.3")
+            assertTrue(java.io.File(ws, ".github/workflows/build.yml").exists())
+            assertTrue(java.io.File(ws, "app/build.gradle.kts").readText().contains("versionCode = 3"))
+
+            val props = mgr.applyLowMemoryGradleProperties(ws)
+            assertTrue(props.readText().contains("org.gradle.daemon=false"))
+            assertTrue(props.readText().contains("org.gradle.jvmargs=-Xmx1g"))
+
+            val ksStatus = mgr.ensureProjectSigningKeystore().getOrThrow()
+            assertTrue(ksStatus.isGenerated)
+            assertTrue(ksStatus.sizeBytes > 100L)
+            assertTrue(ksStatus.certSha256.contains(":"))
+
+            val evilZip = java.io.File(ws, "evil.zip")
+            java.util.zip.ZipOutputStream(java.io.FileOutputStream(evilZip)).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("../../evil.apk"))
+                zos.write(byteArrayOf(0x50, 0x4B, 0x03, 0x04) + ByteArray(200))
+                zos.closeEntry()
+            }
+            // Safe basename extraction lands inside canonicalOut without escaping
+            val safeExtract = mgr.extractApkFromArtifactZip(evilZip, 999L)
+            assertTrue(safeExtract.isSuccess)
+            val extracted = safeExtract.getOrThrow()
+            assertTrue(extracted.apkFile.canonicalPath.startsWith(mgr.apkBuildsDirectory().canonicalPath))
+        } finally {
+            ws.deleteRecursively()
+        }
+
+        // 3. UI check: Dev Studio visible Build APK button, GitHub config + Test Token, Keystore & Build History
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_dev_studio"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_dev_studio").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("dev_studio_build_apk_btn").assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_gh_toggle_btn").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_gh_test_btn").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_gh_test_btn").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("dev_studio_gh_test_result")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("dev_studio_gh_test_result").performScrollTo().assertTextContains("token", substring = true, ignoreCase = true)
+
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_keystore_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_keystore_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("dev_studio_list").performScrollToNode(hasTestTag("dev_studio_build_history_card"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dev_studio_build_history_card").assertIsDisplayed()
+
+        // 4. Settings shows GitHub Username, Repo, Token, and Test token button
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_settings"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_settings").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("settings_list").performScrollToNode(hasTestTag("settings_github_owner_input"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_github_owner_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings_test_github_token_btn").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun phase13ShortsCreatorNavigationPreviewSceneEditingAndGeminiErrorFlowWorkCleanly() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Offline voice/chat command "shorts banao" maps to OPEN_SHORTS
+        val offline = OfflineCapabilitiesEngine(ctx)
+        val intent = offline.evaluateLocalCommandOrKnowledge("shorts banao", emptyList(), emptyList())
+        assertTrue(intent.handledLocally)
+        assertEquals("OPEN_SHORTS", intent.actionKey)
+
+        // 2. Navigate via Hub -> Shorts Creator
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav_hub").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_grid").performScrollToNode(hasTestTag("hub_tile_shorts_creator"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hub_tile_shorts_creator").performClick()
+        composeRule.waitForIdle()
+
+        // 3. 9:16 preview stage & play control render cleanly
+        composeRule.onNodeWithTag("shorts_preview_stage").assertIsDisplayed()
+        composeRule.onNodeWithTag("shorts_preview_play_btn").performScrollTo().assertIsDisplayed()
+
+        // 4. Generate script with no Gemini key shows clear Hinglish error + Retry button
+        composeRule.onNodeWithTag("shorts_creator_list").performScrollToNode(hasTestTag("shorts_topic_input"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("shorts_topic_input").performScrollTo().performTextInput("3 AI Productivity Hacks")
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("shorts_generate_script_btn").performScrollTo().performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000L) {
+            composeRule.onAllNodes(hasTestTag("shorts_script_error_text")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("shorts_script_error_text").performScrollTo()
+            .assertTextContains("Gemini is not available", substring = true)
+        composeRule.onNodeWithTag("shorts_script_retry_btn").performScrollTo().assertIsDisplayed()
+
+        // 5. Add a scene and verify scene chip 4 appears + Export button is accessible
+        composeRule.onNodeWithTag("shorts_creator_list").performScrollToNode(hasTestTag("shorts_add_scene_btn"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("shorts_add_scene_btn").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("shorts_scene_chip_4").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("shorts_creator_list").performScrollToNode(hasTestTag("shorts_export_mp4_btn"))
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("shorts_export_mp4_btn").assertIsDisplayed()
     }
 }
 

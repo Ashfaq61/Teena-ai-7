@@ -86,6 +86,7 @@ import com.example.ui.screens.NotificationsAndRemindersScreen
 import com.example.ui.screens.PermissionsScreen
 import com.example.ui.screens.ResearchCenterScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.ShortsCreatorScreen
 import com.example.ui.screens.SketchScreen
 import com.example.ui.screens.TriggersScreen
 import com.example.ui.screens.VoiceAssistantScreen
@@ -149,6 +150,8 @@ fun TeenaRootScaffold(
     val pendingScreenConfirm by viewModel.pendingScreenConfirmation.collectAsStateWithLifecycle()
     val screenWatchState by viewModel.screenWatchState.collectAsStateWithLifecycle()
     val emergencyStopped by viewModel.isEmergencyStopped.collectAsStateWithLifecycle()
+    val hasActiveWork by viewModel.hasActiveWork.collectAsStateWithLifecycle()
+    val pendingNavRoute by viewModel.pendingNavRoute.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(banner) {
@@ -156,6 +159,18 @@ fun TeenaRootScaffold(
         if (!msg.isNullOrBlank()) {
             snackbarHostState.showSnackbar(msg)
             viewModel.clearBanner()
+        }
+    }
+
+    LaunchedEffect(pendingNavRoute) {
+        val dest = pendingNavRoute
+        if (!dest.isNullOrBlank()) {
+            if (currentRoute != dest) {
+                navController.navigate(dest) {
+                    launchSingleTop = true
+                }
+            }
+            viewModel.clearPendingNavRoute()
         }
     }
 
@@ -199,6 +214,7 @@ fun TeenaRootScaffold(
         "identity" -> "Teena Identity & Persona"
         "voice_rooms" -> "Voice Rooms & LiveKit"
         "music_studio" -> "Teena Music Studio"
+        "shorts_creator" -> "Teena Shorts Creator"
         "website_forge" -> "Teena Website Forge"
         "maps" -> "Teena Interactive Maps"
         "sketch" -> "Teena Sketch Pad"
@@ -290,16 +306,16 @@ fun TeenaRootScaffold(
                                     Spacer(Modifier.size(4.dp))
                                     Text("RESUME", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
-                            } else {
+                            } else if (hasActiveWork) {
                                 Button(
-                                    onClick = { viewModel.triggerEmergencyStop() },
+                                    onClick = { viewModel.stopAllActiveRequestsAndResetUi() },
                                     colors = ButtonDefaults.buttonColors(containerColor = StatusCrimson, contentColor = Color.White),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                     modifier = Modifier
                                         .padding(end = 8.dp)
                                         .testTag("emergency_stop_btn")
                                 ) {
-                                    Icon(Icons.Default.StopCircle, contentDescription = "Emergency Stop", modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.StopCircle, contentDescription = "Stop Active Request", modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.size(4.dp))
                                     Text("STOP", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
@@ -432,6 +448,13 @@ fun TeenaRootScaffold(
                         composable("identity") { IdentityAndPersonaScreen(viewModel) }
                         composable("voice_rooms") { VoiceRoomsScreen(viewModel, onOpenSettings = { navigateTo("settings") }) }
                         composable("music_studio") { MusicStudioScreen(viewModel, onOpenApiManager = { navigateTo("api_manager") }) }
+                        composable("shorts_creator") {
+                            ShortsCreatorScreen(
+                                viewModel = viewModel,
+                                onOpenApiManager = { navigateTo("api_manager") },
+                                onOpenMusicStudio = { navigateTo("music_studio") }
+                            )
+                        }
                         composable("website_forge") { WebsiteForgeScreen(viewModel, onOpenApiManager = { navigateTo("api_manager") }) }
                         composable("maps") { MapsScreen(viewModel) }
                         composable("sketch") { SketchScreen(viewModel, onNavigateToChat = { navigateTo("chat") }) }
